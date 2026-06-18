@@ -1,0 +1,182 @@
+/* Confirmation modal injected on sandboxed (trusted) domains. All selectors are
+   prefixed with `slg-` and values are forced with !important so host-page CSS
+   cannot restyle or hide the warning. */
+
+.slg-overlay {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important; /* max — sit above any page chrome */
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: rgba(15, 23, 42, 0.55) !important;
+  backdrop-filter: blur(2px) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif !important;
+}
+
+.slg-card {
+  box-sizing: border-box !important;
+  width: min(460px, calc(100vw - 32px)) !important;
+  max-width: 460px !important;
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border-radius: 12px !important;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35) !important;
+  overflow: hidden !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+.slg-title {
+  background: #b91c1c !important;
+  color: #ffffff !important;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  padding: 14px 20px !important;
+  margin: 0 !important;
+  line-height: 1.3 !important;
+}
+
+.slg-body { padding: 18px 20px 8px 20px !important; }
+
+.slg-lead {
+  margin: 0 0 14px 0 !important;
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+  color: #334155 !important;
+}
+
+.slg-row {
+  display: flex !important;
+  align-items: baseline !important;
+  gap: 10px !important;
+  margin-bottom: 8px !important;
+}
+
+.slg-label {
+  flex: 0 0 96px !important;
+  font-size: 12px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.04em !important;
+  color: #64748b !important;
+}
+
+.slg-value {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  word-break: break-all !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+
+.slg-from { color: #166534 !important; }
+
+.slg-badge {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  border-radius: 999px !important;
+  padding: 2px 9px !important;
+}
+.slg-badge-ok { color: #166534 !important; background: #dcfce7 !important; }
+.slg-badge-warn { color: #b91c1c !important; background: #fee2e2 !important; }
+
+.slg-trust-wrap {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+.slg-confirm-text {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  color: #0f172a !important;
+}
+
+.slg-btn-mini {
+  appearance: none !important;
+  cursor: pointer !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  border-radius: 6px !important;
+  padding: 3px 10px !important;
+  border: 1px solid transparent !important;
+  line-height: 1.3 !important;
+}
+
+.slg-btn-mini.slg-trust {
+  background: #ffffff !important;
+  color: #166534 !important;
+  border-color: #86efac !important;
+}
+.slg-btn-mini.slg-trust:hover { background: #dcfce7 !important; }
+
+.slg-btn-mini.slg-cancel-mini {
+  background: #ffffff !important;
+  color: #475569 !important;
+  border-color: #cbd5e1 !important;
+}
+.slg-btn-mini.slg-cancel-mini:hover { background: #f8fafc !important; }
+
+.slg-full {
+  font-size: 12px !important;
+  color: #475569 !important;
+  background: #f1f5f9 !important;
+  border-radius: 6px !important;
+  padding: 8px 10px !important;
+  word-break: break-all !important;
+  line-height: 1.4 !important;
+  max-height: 72px !important;
+  overflow: auto !important;
+  margin-top: 6px !important;
+}
+
+.slg-actions {
+  display: flex !important;
+  justify-content: flex-end !important;
+  gap: 10px !important;
+  padding: 16px 20px 18px 20px !important;
+}
+
+.slg-btn {
+  appearance: none !important;
+  cursor: pointer !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  padding: 9px 16px !important;
+  border: 1px solid transparent !important;
+  line-height: 1.2 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+.slg-cancel {
+  background: #f8fafc !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+.slg-cancel:hover { background: #eef2f7 !important; }
+
+.slg-confirm { background: #b91c1c !important; color: #ffffff !important; }
+.slg-confirm:hover { background: #991b1b !important; }
+
+.slg-confirm.slg-wait,
+.slg-btn:disabled {
+  opacity: 0.7 !important;
+  cursor: not-allowed !important;
+}
+
+.slg-spinner {
+  width: 13px !important;
+  height: 13px !important;
+  border: 2px solid rgba(255, 255, 255, 0.5) !important;
+  border-top-color: #ffffff !important;
+  border-radius: 50% !important;
+  display: inline-block !important;
+  animation: slg-spin 0.7s linear infinite !important;
+}
+
+@keyframes slg-spin { to { transform: rotate(360deg); } }

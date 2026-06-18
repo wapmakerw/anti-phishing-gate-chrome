@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sandbox Link Guard</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1 class="brand">Sandbox Link Guard</h1>
+      <p class="tagline">Warn before leaving trusted sites</p>
+    </header>
+
+    <section class="current">
+      <div class="current-label">Current domain</div>
+      <div id="currentDomain" class="current-domain">—</div>
+      <div id="status" class="status"></div>
+      <div class="current-actions">
+        <button id="toggleBtn" class="toggle-btn" disabled>Add to sandbox</button>
+        <button id="trustBtn" class="toggle-btn secondary" disabled>Mark trusted</button>
+      </div>
+    </section>
+
+    <section class="list-section">
+      <div class="list-header">
+        <span>Sandboxed domains</span>
+        <span id="count" class="count">0</span>
+      </div>
+      <p class="section-hint">Protection is active while you browse these.</p>
+      <ul id="domainList" class="domain-list"></ul>
+      <p id="emptyHint" class="empty-hint">
+        No sandboxed domains yet. Visit a site you want to protect and add it.
+      </p>
+    </section>
+
+    <section class="list-section">
+      <div class="list-header">
+        <span>Trusted domains</span>
+        <span id="trustedCount" class="count">0</span>
+      </div>
+      <p class="section-hint">Never prompted as a destination, even from a sandboxed site.</p>
+      <ul id="trustedList" class="domain-list"></ul>
+      <p id="trustedEmptyHint" class="empty-hint">
+        No trusted destinations yet.
+      </p>
+    </section>
+
+    <script src="../lib/domain.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

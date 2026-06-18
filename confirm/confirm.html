@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Confirm navigation</title>
+    <link rel="stylesheet" href="confirm.css" />
+  </head>
+  <body>
+    <main class="card">
+      <div class="banner">Redirect blocked — confirm before continuing</div>
+      <div class="content">
+        <p class="lead">
+          A link from a protected site is trying to send your browser to a
+          domain that isn't on your trusted list:
+        </p>
+        <div class="domain" id="domain">…</div>
+        <div class="full" id="full"></div>
+        <p class="hint">
+          Only continue if you recognise and trust this domain. If you didn't
+          expect this, close the window.
+        </p>
+        <label class="remember">
+          <input type="checkbox" id="always" checked />
+          Always trust this domain (don't ask again)
+        </label>
+      </div>
+      <div class="actions">
+        <button id="cancel" class="btn cancel">Close window</button>
+        <button id="continue" class="btn go" disabled>Continue</button>
+      </div>
+    </main>
+
+    <script src="../lib/domain.js"></script>
+    <script src="confirm.js"></script>
+  </body>
+</html>

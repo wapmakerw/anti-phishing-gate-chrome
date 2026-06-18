@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="0.55" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.40"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Shield -->
+  <path d="M64 14 L106 28 L106 62 C106 91 87 110 64 118 C41 110 22 91 22 62 L22 28 Z"
+        fill="url(#shield)" stroke="#0b1736" stroke-opacity="0.18" stroke-width="2"/>
+
+  <!-- Top gloss highlight -->
+  <path d="M30 32 L98 32 L98 58 C84 68 44 68 30 58 Z" fill="url(#gloss)"/>
+
+  <!-- Fish hook emblem (phishing), bold so it survives downscaling -->
+  <g fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <!-- eye -->
+    <circle cx="64" cy="38" r="8" stroke-width="9"/>
+    <!-- shank + bend + barb -->
+    <path d="M64 49 L64 80 C64 95 46 98 41 84 C38 77 44 72 50 75"/>
+  </g>
+</svg>
