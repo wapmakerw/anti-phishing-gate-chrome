@@ -7,8 +7,7 @@
     "storage",
     "tabs",
     "activeTab",
-    "declarativeNetRequest",
-    "webNavigation"
+    "declarativeNetRequest"
   ],
   "host_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [

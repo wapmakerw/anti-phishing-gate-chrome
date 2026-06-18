@@ -3,18 +3,22 @@
 A Chrome extension (Manifest V3) that helps you **avoid phishing redirects**.
 (Packaged as `sandbox-link-guard` by the build script.)
 
-You mark domains you want to protect (your bank, your company portal, your
+You mark sites you want to protect (your bank, your company portal, your
 webmail) as **sandboxed**. While you are on one of those sites, if a link tries
-to open a **different domain in a new window/tab**, the extension pauses and
-shows a confirmation modal that clearly displays the real destination — so a
+to open a **different host in a new window/tab**, the extension pauses and
+shows a confirmation modal that clearly displays the destination — so a
 malicious "click here to verify your account" link can't quietly whisk you off
 to a look-alike phishing site.
 
+Matching is at the **full host level** — `mail.example.com`, `app.example.com`
+and `example.com` are distinct. Sandboxing or trusting one does not cover the
+others.
+
 There are two lists:
 
-- **Sandboxed domains** — sites where protection is *active*. While browsing
-  these, outbound links to other domains are confirmed.
-- **Trusted domains** — destination allowlist. A link *to* one of these is
+- **Sandboxed hosts** — sites where protection is *active*. While browsing
+  these, links to any other host are confirmed.
+- **Trusted hosts** — destination allowlist. A link *to* one of these is
   **never** prompted, even from a sandboxed site (e.g. trust your SSO provider
   so legit logins don't nag you).
 
@@ -22,25 +26,26 @@ There are two lists:
 
 1. Open a site you want to protect and click the toolbar icon → **Add to
    sandbox**. (Or **Mark trusted** to allowlist it as a destination.)
-2. The domain (registrable domain, e.g. `example.com` — covers all its
-   subdomains) is saved to `chrome.storage.local`.
+2. The **host** (e.g. `app.example.com`) is saved to `chrome.storage.local`.
 3. On any sandboxed page, the content script watches link clicks. When a click
-   would open an **external** domain in a **new window** (`target="_blank"`,
-   `Ctrl`/`Cmd`/`Shift`-click, or middle-click) **and that domain isn't
-   trusted**, it blocks the click and shows a confirmation modal. The URL is
-   used **verbatim** — it is never transformed, unwrapped, or fetched.
-4. The modal shows the destination domain (with a **Trust** button that asks for
+   would open a **different host** in a **new window** (`target="_blank"`,
+   `Ctrl`/`Cmd`/`Shift`-click, or middle-click) **and that host isn't trusted**,
+   it blocks the click and shows a confirmation modal. The URL is used
+   **verbatim** — it is never transformed, unwrapped, or fetched.
+4. The modal shows the destination host (with a **Trust** button that asks for
    confirmation before whitelisting it) and the full URL. Its **"Open external
    site"** button is disabled for **5 seconds** (a forced pause with a small
    loading animation), then becomes clickable. Nothing is navigated by the click
    itself.
 5. On **Open**, the background worker opens the link in a **new window it
-   guards**. As the browser navigates — including through every HTTP redirect
-   hop — any main-frame request to a **non-trusted** domain is intercepted
-   *before it loads* and replaced with a confirmation page. You authorize each
-   untrusted domain as you actually reach it; **Continue** whitelists it (with
-   an "always trust" checkbox) and proceeds, **Close window** cancels entirely.
-6. Once the window lands on an allowed HTML page, guarding stops.
+   guards**. As the browser navigates — including through **every** redirect hop
+   (HTTP 3xx, `<meta refresh>`, JS `location=`, or an interstitial you click
+   through) — any main-frame request to a **non-trusted** host is intercepted
+   *before it loads* and replaced with a confirmation page (whose **Continue**
+   button also has a 5-second pause). **Continue** whitelists that host and
+   proceeds; **Close window** cancels entirely.
+6. The window stays guarded for its whole lifetime (until you close it), so a
+   chain that passes through several hosts is confirmed at **each** one.
 
 The toolbar badge shows **ON** (green) when the current tab's domain is
 sandboxed.
@@ -74,10 +79,10 @@ background.js          Service worker. (1) Toolbar badge in sync with the active
                        that allow trusted/authorized domains and redirect every
                        other main-frame hop to the confirmation page, and
                        unguards the window once it lands on a real page.
-lib/domain.js          Shared helpers: registrableDomain() (eTLD+1 with a common
-                       multi-part TLD list) and isExternalDomain(). Loaded by the
-                       popup and confirm page (script tag), content script
-                       (manifest), worker (importScripts).
+lib/domain.js          Shared helpers: hostOf() (normalized hostname) and
+                       isExternalHost(). Loaded by the popup and confirm page
+                       (script tag), content script (manifest), worker
+                       (importScripts).
 content/
   content.js           Activates only when the page domain is in the sandbox list.
                        Capture-phase click/auxclick interception + the modal with
@@ -104,9 +109,9 @@ icons/
 ```
 
 **State:** two `chrome.storage.local` keys — `sandboxDomains` (protected sites)
-and `trustedDomains` (destination allowlist) — each an array of
-registrable-domain strings, observed live via `storage.onChanged`. Guard state
-(which windows are guarded, which domains were allowed "just once" this session)
+and `trustedDomains` (destination allowlist) — each an array of **host** strings
+(despite the key names), observed live via `storage.onChanged`. Guard state
+(which windows are guarded, which hosts were allowed "just once" this session)
 lives in memory in the worker and drives the `declarativeNetRequest` session
 rules; "always trust" choices are persisted to `trustedDomains`.
 
@@ -161,8 +166,8 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
    again. **Close window** cancels.
    - In the initial modal you can also click **Trust** next to the destination
      domain and confirm **Yes** to whitelist it up front.
-5. Click a link to another **wikipedia.org** page in a new tab → no modal
-   (same registrable domain).
+5. Click a link to a **different host** (even a sibling subdomain) in a new tab
+   → modal appears; a link to the **same host** → no modal.
 6. **Remove from sandbox** in the popup → badge clears, links open normally.
 
 ### Debugging
@@ -181,18 +186,22 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 
 ## Known limitations
 
-- **Registrable-domain matching** uses a pragmatic multi-part-TLD list in
-  `lib/domain.js`, not the full Public Suffix List. Add entries there if you
-  need a TLD it doesn't cover.
-- **Per-hop gating covers HTTP redirects and main-frame navigations only.** The
-  guarded window catches every `main_frame` request (the initial load and each
-  HTTP 3xx hop) via `declarativeNetRequest`. It does **not** stop client-side
-  redirects (`<meta refresh>`, JavaScript `location =`) on a page that has
-  already loaded — once a real HTML page renders, guarding stops by design.
+- **Host-level matching is exact.** `app.example.com` and `example.com` are
+  treated as different sites; sandboxing/trusting one does not cover the other.
+  (When the worker installs an allow rule for a host, `declarativeNetRequest`
+  also allows that host's *subdomains* — i.e. allowing `example.com` covers
+  `x.example.com`, but never a sibling like `evil.com`.)
+- **Per-hop gating covers `main_frame` requests.** The guarded window catches
+  every main-frame request via `declarativeNetRequest` — the initial load, each
+  HTTP 3xx hop, `<meta refresh>`, JS `location =`, and clicks to a new host —
+  and confirms each non-trusted host. The window stays guarded for its whole
+  lifetime, so it does not skip hops after an intermediate page loads. It cannot
+  see same-document changes (hash updates) or content swapped in via `fetch`/XHR
+  without a new main-frame navigation.
 - **Guarding is per new window.** The flow opens the link in its own window and
-  gates that window until it lands. Links opened in the same tab are not gated
-  (the extension targets new-window/new-tab opens, the common phishing vector).
-- **"Just once" allows last for the browser session.** Continuing past a domain
+  gates it until you close it. Links opened in the same tab are not gated (the
+  extension targets new-window/new-tab opens, the common phishing vector).
+- **"Just once" allows last for the browser session.** Continuing past a host
   without the "always trust" checkbox authorizes it for the rest of the session
   (kept in worker memory); checking the box persists it to `trustedDomains`.
 - **JavaScript-driven popups** (`window.open(...)` called by page scripts) are

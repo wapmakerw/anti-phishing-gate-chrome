@@ -26,7 +26,6 @@ var ALLOW_RULE_ID = 1;
 var REDIRECT_RULE_ID = 2;
 
 var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
-var EXT_ORIGIN = chrome.runtime.getURL("");
 
 // In-memory guard state (session scoped).
 var guardedTabs = new Set();      // tab ids whose navigation we gate
@@ -34,10 +33,7 @@ var sessionAllowed = new Set();   // domains authorized this session ("once")
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
 function hostOf(url) {
-  try { return new URL(url).hostname; } catch (e) { return ""; }
-}
-function domainOf(url) {
-  return domainLib.registrableDomain(hostOf(url));
+  return domainLib.hostOf(url);
 }
 function uniq(arr) {
   var out = [];
@@ -52,10 +48,10 @@ function uniq(arr) {
 // ----------------------------------------------------------------------------
 
 function updateBadge(tabId, url) {
-  var domain = /^https?:/i.test(url || "") ? domainOf(url) : null;
+  var host = /^https?:/i.test(url || "") ? hostOf(url) : null;
   chrome.storage.local.get(SANDBOX_KEY, function (data) {
     var list = (data && data[SANDBOX_KEY]) || [];
-    var on = domain && list.indexOf(domain) !== -1;
+    var on = host && list.indexOf(host) !== -1;
     chrome.action.setBadgeText({ tabId: tabId, text: on ? "ON" : "" });
     if (on) chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#166534" });
   });
@@ -150,14 +146,13 @@ function unguard(tabId) {
   if (guardedTabs.delete(tabId)) rebuildRules();
 }
 
-// Stop guarding once a guarded tab successfully lands on a real http(s) page
-// (i.e. a request that was allowed through, not our confirmation interstitial).
-chrome.webNavigation.onCompleted.addListener(function (d) {
-  if (d.frameId !== 0 || !guardedTabs.has(d.tabId)) return;
-  if (!/^https?:/i.test(d.url)) return;               // about:blank, etc.
-  if (d.url.indexOf(EXT_ORIGIN) === 0) return;        // the confirmation page
-  unguard(d.tabId);
-});
+// We deliberately guard the window for its WHOLE lifetime (until it is closed),
+// not just until the first page loads. A redirect chain can pass through real
+// HTML pages mid-way (e.g. a Proofpoint URLDefense interstitial that then
+// forwards to a tracker that forwards to the destination). Unguarding on the
+// first completed load would skip every hop after it — so we keep gating every
+// main-frame request (each HTTP redirect, meta-refresh, JS redirect, or click
+// to a new host) until the user closes the window.
 
 chrome.tabs.onRemoved.addListener(function (tabId) { unguard(tabId); });
 
@@ -166,7 +161,7 @@ chrome.tabs.onRemoved.addListener(function (tabId) { unguard(tabId); });
 // ----------------------------------------------------------------------------
 
 async function guardedOpen(targetUrl) {
-  var destDomain = domainOf(targetUrl);
+  var destHost = hostOf(targetUrl);
   // Open a blank window first so the guard rules are active BEFORE the real
   // navigation begins (avoids a race where the target loads ungated).
   var win = await chrome.windows.create({ url: "about:blank", focused: true });
@@ -174,7 +169,7 @@ async function guardedOpen(targetUrl) {
   if (tabId == null) return;
 
   guardedTabs.add(tabId);
-  if (destDomain) sessionAllowed.add(destDomain); // user already validated it
+  if (destHost) sessionAllowed.add(destHost); // user already validated it
   await rebuildRules();
   await chrome.tabs.update(tabId, { url: targetUrl });
 }

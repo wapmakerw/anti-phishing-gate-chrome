@@ -118,11 +118,7 @@
   chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
     var tab = tabs && tabs[0];
     if (tab && tab.url && /^https?:/i.test(tab.url)) {
-      try {
-        currentDomain = domainLib.registrableDomain(new URL(tab.url).hostname);
-      } catch (e) {
-        currentDomain = null;
-      }
+      currentDomain = domainLib.hostOf(tab.url) || null;
     }
     els.currentDomain.textContent = currentDomain || "Unsupported page";
     render();

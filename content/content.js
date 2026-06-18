@@ -1,6 +1,6 @@
 /*
  * Content script — runs on every page, but only *activates* when the page's
- * registrable domain is in the user's sandbox list.
+ * full host is in the user's sandbox list.
  *
  * Anti-phishing flow: on a sandboxed page, when a link would open a different
  * domain in a NEW WINDOW, we block it and show a confirmation modal. The
@@ -18,7 +18,7 @@
   var TRUSTED_KEY = "trustedDomains";
   var OPEN_DELAY_SECONDS = 5;
   var lib = self.SandboxDomain;
-  var currentDomain = lib.registrableDomain(location.hostname);
+  var currentHost = lib.hostOf(location.hostname);
   var active = false;
   var trusted = [];
   var modalOpen = false;
@@ -27,21 +27,19 @@
 
   chrome.storage.local.get([SANDBOX_KEY, TRUSTED_KEY], function (data) {
     data = data || {};
-    active = ((data[SANDBOX_KEY]) || []).indexOf(currentDomain) !== -1;
+    active = ((data[SANDBOX_KEY]) || []).indexOf(currentHost) !== -1;
     trusted = (data[TRUSTED_KEY]) || [];
   });
 
   chrome.storage.onChanged.addListener(function (changes, area) {
     if (area !== "local") return;
     if (changes[SANDBOX_KEY]) {
-      active = (changes[SANDBOX_KEY].newValue || []).indexOf(currentDomain) !== -1;
+      active = (changes[SANDBOX_KEY].newValue || []).indexOf(currentHost) !== -1;
     }
     if (changes[TRUSTED_KEY]) trusted = changes[TRUSTED_KEY].newValue || [];
   });
 
-  function isTrusted(domain) { return trusted.indexOf(domain) !== -1; }
-  function safeHost(url) { try { return new URL(url).hostname; } catch (e) { return url; } }
-  function domainOf(url) { return lib.registrableDomain(safeHost(url)); }
+  function isTrusted(host) { return trusted.indexOf(host) !== -1; }
 
   // --- link interception ---------------------------------------------------
 
@@ -61,12 +59,12 @@
 
     var url = anchor.href;
     if (!/^https?:/i.test(url)) return; // ignore mailto:, tel:, javascript:, #fragments
-    if (!lib.isExternalDomain(url, location.hostname)) return;
+    if (!lib.isExternalHost(url, location.hostname)) return;
     if (!opensNewWindow(anchor, event)) return;
 
     // The URL is used verbatim — never transformed, fetched, or pre-navigated.
-    var destDomain = domainOf(url);
-    if (isTrusted(destDomain)) return;
+    var destHost = lib.hostOf(url);
+    if (isTrusted(destHost)) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -83,8 +81,8 @@
   function openModal(clickedUrl) {
     modalOpen = true;
 
-    var destDomain = domainOf(clickedUrl);
-    var destTrusted = isTrusted(destDomain);
+    var destHost = lib.hostOf(clickedUrl);
+    var destTrusted = isTrusted(destHost);
 
     var overlay = el("div", "slg-overlay");
     overlay.setAttribute("role", "dialog");
@@ -99,16 +97,16 @@
 
     var fromRow = el("div", "slg-row");
     fromRow.appendChild(el("span", "slg-label", "From (trusted)"));
-    fromRow.appendChild(el("span", "slg-value slg-from", currentDomain));
+    fromRow.appendChild(el("span", "slg-value slg-from", currentHost));
 
     var toRow = el("div", "slg-row");
     toRow.appendChild(el("span", "slg-label", "Going to"));
     var toVal = el("span", "slg-value");
-    toVal.appendChild(el("span", null, destDomain));
+    toVal.appendChild(el("span", null, destHost));
     var badge = el("span", "slg-badge " + (destTrusted ? "slg-badge-ok" : "slg-badge-warn"),
       destTrusted ? "trusted" : "not trusted");
     toVal.appendChild(badge);
-    if (!destTrusted) toVal.appendChild(buildTrustControl(destDomain, badge));
+    if (!destTrusted) toVal.appendChild(buildTrustControl(destHost, badge));
     toRow.appendChild(toVal);
 
     body.appendChild(fromRow);
