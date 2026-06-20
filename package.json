@@ -12,5 +12,8 @@
     "modulePathIgnorePatterns": [
       "<rootDir>/dist/"
     ]
+  },
+  "dependencies": {
+    "playwright": "^1.61.0"
   }
 }

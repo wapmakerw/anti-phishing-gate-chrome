@@ -159,8 +159,14 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
   if (details.frameId !== 0) return;
   if (details.error === "net::ERR_BLOCKED_BY_CLIENT") {
     var blockedUrl = details.url;
-    var tabId = details.tabId;
+    var host = hostOf(blockedUrl);
     
+    // If the blocked URL is our own sandbox domain, do not prompt the user for it.
+    if (host && sandboxList.indexOf(host) !== -1) {
+      return;
+    }
+    
+    var tabId = details.tabId;
     guardedTabs.add(tabId);
     rebuildRules().then(function () {
       chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });

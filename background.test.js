@@ -41,6 +41,7 @@ const mockChrome = {
 
 global.chrome = mockChrome;
 global.self = global;
+global.SandboxDomain = require("./lib/domain");
 
 // Mock importScripts for background.js
 global.importScripts = jest.fn(file => {
