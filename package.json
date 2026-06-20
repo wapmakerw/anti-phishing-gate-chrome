@@ -1,0 +1,16 @@
+{
+  "name": "sandbox-link-guard",
+  "version": "1.0.0",
+  "description": "Added layer of manual screening to help you avoid phishing links.",
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "modulePathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ]
+  }
+}

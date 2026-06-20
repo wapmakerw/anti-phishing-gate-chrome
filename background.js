@@ -21,15 +21,16 @@ var SANDBOX_KEY = "sandboxDomains";
 var TRUSTED_KEY = "trustedDomains";
 var domainLib = self.SandboxDomain;
 
-// DNR session-rule ids (we keep exactly these two and rebuild them as needed).
-var ALLOW_RULE_ID = 1;
-var REDIRECT_RULE_ID = 2;
+// DNR session-rule ids
+var BLOCK_GUARDED_RULE_ID = 2;
+var BLOCK_SANDBOX_RULE_ID = 3;
 
 var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
 
 // In-memory guard state (session scoped).
 var guardedTabs = new Set();      // tab ids whose navigation we gate
 var sessionAllowed = new Set();   // domains authorized this session ("once")
+var sandboxList = [];             // cached copy of SANDBOX_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
 function hostOf(url) {
@@ -79,8 +80,9 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
 // Trusted-list cache
 // ----------------------------------------------------------------------------
 
-function loadTrusted(cb) {
-  chrome.storage.local.get(TRUSTED_KEY, function (data) {
+function loadSandboxAndTrusted(cb) {
+  chrome.storage.local.get([SANDBOX_KEY, TRUSTED_KEY], function (data) {
+    sandboxList = (data && data[SANDBOX_KEY]) || [];
     trustedList = (data && data[TRUSTED_KEY]) || [];
     if (cb) cb();
   });
@@ -88,7 +90,11 @@ function loadTrusted(cb) {
 
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== "local") return;
-  if (changes[SANDBOX_KEY]) refreshActiveTab();
+  if (changes[SANDBOX_KEY]) {
+    sandboxList = changes[SANDBOX_KEY].newValue || [];
+    refreshActiveTab();
+    rebuildRules();
+  }
   if (changes[TRUSTED_KEY]) {
     trustedList = changes[TRUSTED_KEY].newValue || [];
     rebuildRules(); // newly trusted domains stop being gated
@@ -99,45 +105,42 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 // declarativeNetRequest gating rules
 // ----------------------------------------------------------------------------
 
-// ALLOW (high priority): trusted + session-allowed domains load normally in
-// guarded tabs. REDIRECT (low priority): everything else main-frame in a
-// guarded tab is sent to the confirmation page, with the blocked URL appended
-// raw after "?d=" (parsed by substring, not URLSearchParams).
 function rebuildRules() {
   var tabIds = Array.from(guardedTabs);
   var addRules = [];
 
+  var excludedDomains = uniq(trustedList.concat(Array.from(sessionAllowed)));
+
+  // 1. Guarded tabs block rule
   if (tabIds.length) {
-    var allowDomains = uniq(trustedList.concat(Array.from(sessionAllowed)));
-    if (allowDomains.length) {
-      addRules.push({
-        id: ALLOW_RULE_ID,
-        priority: 100,
-        action: { type: "allow" },
-        condition: {
-          resourceTypes: ["main_frame"],
-          tabIds: tabIds,
-          requestDomains: allowDomains
-        }
-      });
-    }
     addRules.push({
-      id: REDIRECT_RULE_ID,
+      id: BLOCK_GUARDED_RULE_ID,
       priority: 10,
-      action: {
-        type: "redirect",
-        redirect: { regexSubstitution: CONFIRM_URL + "?d=\\1" }
-      },
+      action: { type: "block" },
       condition: {
         resourceTypes: ["main_frame"],
         tabIds: tabIds,
-        regexFilter: "^(https?:\\/\\/.*)$"
+        excludedRequestDomains: excludedDomains
+      }
+    });
+  }
+
+  // 2. Initiator-based sandbox block rule
+  if (sandboxList.length) {
+    addRules.push({
+      id: BLOCK_SANDBOX_RULE_ID,
+      priority: 10,
+      action: { type: "block" },
+      condition: {
+        resourceTypes: ["main_frame"],
+        initiatorDomains: sandboxList,
+        excludedRequestDomains: uniq(excludedDomains.concat(sandboxList))
       }
     });
   }
 
   return chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [ALLOW_RULE_ID, REDIRECT_RULE_ID],
+    removeRuleIds: [BLOCK_GUARDED_RULE_ID, BLOCK_SANDBOX_RULE_ID],
     addRules: addRules
   });
 }
@@ -146,33 +149,46 @@ function unguard(tabId) {
   if (guardedTabs.delete(tabId)) rebuildRules();
 }
 
-// We deliberately guard the window for its WHOLE lifetime (until it is closed),
-// not just until the first page loads. A redirect chain can pass through real
-// HTML pages mid-way (e.g. a Proofpoint URLDefense interstitial that then
-// forwards to a tracker that forwards to the destination). Unguarding on the
-// first completed load would skip every hop after it — so we keep gating every
-// main-frame request (each HTTP redirect, meta-refresh, JS redirect, or click
-// to a new host) until the user closes the window.
-
 chrome.tabs.onRemoved.addListener(function (tabId) { unguard(tabId); });
 
 // ----------------------------------------------------------------------------
-// Messages from the content script (open) and confirmation page (allow/cancel)
+// Blocked Navigation Interception
 // ----------------------------------------------------------------------------
 
-async function guardedOpen(targetUrl) {
-  var destHost = hostOf(targetUrl);
-  // Open a blank window first so the guard rules are active BEFORE the real
-  // navigation begins (avoids a race where the target loads ungated).
-  var win = await chrome.windows.create({ url: "about:blank", focused: true });
-  var tabId = win && win.tabs && win.tabs[0] && win.tabs[0].id;
-  if (tabId == null) return;
+chrome.webNavigation.onErrorOccurred.addListener(function (details) {
+  if (details.frameId !== 0) return;
+  if (details.error === "net::ERR_BLOCKED_BY_CLIENT") {
+    var blockedUrl = details.url;
+    var tabId = details.tabId;
+    
+    guardedTabs.add(tabId);
+    rebuildRules().then(function () {
+      chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
+    });
+  }
+});
 
-  guardedTabs.add(tabId);
-  if (destHost) sessionAllowed.add(destHost); // user already validated it
-  await rebuildRules();
-  await chrome.tabs.update(tabId, { url: targetUrl });
-}
+chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
+  if (details.sourceTabId == null || details.sourceTabId === -1) return;
+  var isSourceGuarded = guardedTabs.has(details.sourceTabId);
+  if (isSourceGuarded) {
+    guardedTabs.add(details.tabId);
+    rebuildRules();
+    return;
+  }
+  chrome.tabs.get(details.sourceTabId, function (tab) {
+    if (chrome.runtime.lastError || !tab || !tab.url) return;
+    var host = hostOf(tab.url);
+    if (host && sandboxList.indexOf(host) !== -1) {
+      guardedTabs.add(details.tabId);
+      rebuildRules();
+    }
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Messages from the confirmation page (allow/cancel)
+// ----------------------------------------------------------------------------
 
 async function allowDomain(domain, target, tabId, always) {
   if (domain) sessionAllowed.add(domain);
@@ -189,21 +205,21 @@ async function allowDomain(domain, target, tabId, always) {
   if (tabId != null && target) await chrome.tabs.update(tabId, { url: target });
 }
 
-async function cancelGuard(tabId) {
-  if (tabId != null) {
-    guardedTabs.delete(tabId);
-    await rebuildRules();
-    try { await chrome.tabs.remove(tabId); } catch (e) {}
-  }
+function cancelGuard(tabId) {
+  if (tabId == null) return;
+  guardedTabs.delete(tabId);
+  rebuildRules();
+  chrome.tabs.goBack(tabId, function () {
+    if (chrome.runtime.lastError) {
+      chrome.tabs.remove(tabId, function () {
+        if (chrome.runtime.lastError) {}
+      });
+    }
+  });
 }
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || !msg.type) return;
-  if (msg.type === "guardedOpen" && msg.url) {
-    guardedOpen(msg.url).then(function () { sendResponse({ ok: true }); },
-      function (e) { sendResponse({ ok: false, error: String(e) }); });
-    return true;
-  }
   if (msg.type === "allowDomain") {
     allowDomain(msg.domain, msg.target, msg.tabId, !!msg.always)
       .then(function () { sendResponse({ ok: true }); },
@@ -211,8 +227,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return true;
   }
   if (msg.type === "cancelGuard") {
-    cancelGuard(msg.tabId).then(function () { sendResponse({ ok: true }); },
-      function () { sendResponse({ ok: false }); });
+    cancelGuard(msg.tabId);
+    sendResponse({ ok: true });
     return true;
   }
 });
@@ -222,7 +238,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // ----------------------------------------------------------------------------
 
 function init() {
-  loadTrusted(rebuildRules);
+  loadSandboxAndTrusted(rebuildRules);
   refreshActiveTab();
 }
 

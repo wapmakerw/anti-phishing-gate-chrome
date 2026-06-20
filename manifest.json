@@ -7,11 +7,8 @@
     "storage",
     "tabs",
     "activeTab",
-    "declarativeNetRequest"
-  ],
-  "host_permissions": ["http://*/*", "https://*/*"],
-  "web_accessible_resources": [
-    { "resources": ["confirm/confirm.html"], "matches": ["<all_urls>"] }
+    "declarativeNetRequest",
+    "webNavigation"
   ],
   "icons": {
     "16": "icons/icon-16.png",
@@ -31,14 +28,5 @@
   },
   "background": {
     "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["lib/domain.js", "content/content.js"],
-      "css": ["content/content.css"],
-      "run_at": "document_start",
-      "all_frames": true
-    }
-  ]
+  }
 }

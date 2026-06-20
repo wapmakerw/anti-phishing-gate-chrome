@@ -29,7 +29,7 @@ NAME="sandbox-link-guard"
 STAGE="$DIST/$NAME"
 
 # Files/dirs that make up the shipping extension.
-INCLUDE="manifest.json background.js lib content popup confirm icons"
+INCLUDE="manifest.json background.js lib popup confirm icons"
 
 # --- preflight ---------------------------------------------------------------
 # zip is genuinely required to produce the artifact.
@@ -51,14 +51,17 @@ if [ "$HAVE_NODE" -eq 1 ]; then
   # Manifest must be valid JSON; read the version from it.
   VERSION="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('manifest.json','utf8')).version)")"
   # Syntax-check every JS file (paths here contain no spaces).
-  for f in $(find lib content popup background.js -name '*.js'); do
+  for f in $(find lib popup background.js -name '*.js'); do
     node --check "$f"
   done
   echo "    manifest valid, version $VERSION, JS OK"
+  
+  echo "==> Running unit tests"
+  npm test
 else
   # Node-less version read: grab the first "version": "x.y.z" from the manifest.
   VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' manifest.json | head -1)"
-  echo "    WARNING: 'node' not found — skipping JS/JSON validation."
+  echo "    WARNING: 'node' not found — skipping JS/JSON validation and tests."
   echo "    version $VERSION (read without node)"
 fi
 
@@ -76,6 +79,8 @@ done
 
 # Ship only the rasterized icons, not the SVG source / generator script.
 rm -f "$STAGE/icons/icon.svg" "$STAGE/icons/make-icons.sh"
+# Exclude unit test files from the staged extension.
+rm -f "$STAGE/lib/domain.test.js"
 
 ZIP="$DIST/$NAME-$VERSION.zip"
 echo "==> Zipping $ZIP"

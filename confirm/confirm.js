@@ -15,7 +15,7 @@
   // Everything after the first "d=" is the original target URL, verbatim.
   var search = location.search || "";
   var marker = search.indexOf("d=");
-  var target = marker >= 0 ? search.slice(marker + 2) : "";
+  var target = marker >= 0 ? decodeURIComponent(search.slice(marker + 2)) : "";
   var host = lib.hostOf(target) || target;
 
   var els = {
