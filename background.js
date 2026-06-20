@@ -29,7 +29,8 @@ var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
 
 // In-memory guard state (session scoped).
 var guardedTabs = new Set();      // tab ids whose navigation we gate
-var sessionAllowed = new Set();   // domains authorized this session ("once")
+var sessionAllowed = {};          // tabId -> Set of domains authorized this session
+var activeRuleIds = new Set();    // active declarativeNetRequest session rule IDs
 var sandboxList = [];             // cached copy of SANDBOX_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
@@ -96,8 +97,32 @@ chrome.storage.onChanged.addListener(function (changes, area) {
     rebuildRules();
   }
   if (changes[TRUSTED_KEY]) {
-    trustedList = changes[TRUSTED_KEY].newValue || [];
-    rebuildRules(); // newly trusted domains stop being gated
+    var oldVal = changes[TRUSTED_KEY].oldValue || [];
+    var newVal = changes[TRUSTED_KEY].newValue || [];
+    var changed = false;
+    if (newVal.length !== trustedList.length) {
+      changed = true;
+    } else {
+      for (var i = 0; i < newVal.length; i++) {
+        if (trustedList.indexOf(newVal[i]) === -1) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    for (var i = 0; i < oldVal.length; i++) {
+      if (newVal.indexOf(oldVal[i]) === -1) {
+        for (var tabId in sessionAllowed) {
+          if (sessionAllowed[tabId]) {
+            sessionAllowed[tabId].delete(oldVal[i]);
+          }
+        }
+      }
+    }
+    if (changed) {
+      trustedList = newVal;
+      rebuildRules(); // newly trusted domains stop being gated
+    }
   }
 });
 
@@ -108,25 +133,31 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 function rebuildRules() {
   var tabIds = Array.from(guardedTabs);
   var addRules = [];
+  var newRuleIds = new Set();
 
-  var excludedDomains = uniq(trustedList.concat(Array.from(sessionAllowed)));
-
-  // 1. Guarded tabs block rule
-  if (tabIds.length) {
+  // 1. Guarded tabs block rules (one rule per guarded tab)
+  for (var i = 0; i < tabIds.length; i++) {
+    var tabId = tabIds[i];
+    var allowed = sessionAllowed[tabId] ? Array.from(sessionAllowed[tabId]) : [];
+    var excludedDomains = uniq(trustedList.concat(allowed));
+    
+    var ruleId = 1000 + tabId;
     addRules.push({
-      id: BLOCK_GUARDED_RULE_ID,
+      id: ruleId,
       priority: 10,
       action: { type: "block" },
       condition: {
         resourceTypes: ["main_frame"],
-        tabIds: tabIds,
+        tabIds: [tabId],
         excludedRequestDomains: excludedDomains
       }
     });
+    newRuleIds.add(ruleId);
   }
 
   // 2. Initiator-based sandbox block rule
   if (sandboxList.length) {
+    var excludedDomainsForSandbox = uniq(trustedList.concat(sandboxList));
     addRules.push({
       id: BLOCK_SANDBOX_RULE_ID,
       priority: 10,
@@ -134,18 +165,23 @@ function rebuildRules() {
       condition: {
         resourceTypes: ["main_frame"],
         initiatorDomains: sandboxList,
-        excludedRequestDomains: uniq(excludedDomains.concat(sandboxList))
+        excludedRequestDomains: excludedDomainsForSandbox
       }
     });
+    newRuleIds.add(BLOCK_SANDBOX_RULE_ID);
   }
 
+  var removeRuleIds = Array.from(activeRuleIds);
+  activeRuleIds = newRuleIds;
+
   return chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [BLOCK_GUARDED_RULE_ID, BLOCK_SANDBOX_RULE_ID],
+    removeRuleIds: removeRuleIds,
     addRules: addRules
   });
 }
 
 function unguard(tabId) {
+  delete sessionAllowed[tabId];
   if (guardedTabs.delete(tabId)) rebuildRules();
 }
 
@@ -167,9 +203,20 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
     }
     
     var tabId = details.tabId;
-    guardedTabs.add(tabId);
-    rebuildRules().then(function () {
-      chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
+    
+    chrome.tabs.get(tabId, function (tab) {
+      if (!chrome.runtime.lastError && tab && tab.url) {
+        var currentHost = hostOf(tab.url);
+        if (currentHost && sandboxList.indexOf(currentHost) !== -1) {
+          // Reset session-allowed domains for this tab on fresh navigation from sandbox
+          sessionAllowed[tabId] = new Set();
+        }
+      }
+      
+      guardedTabs.add(tabId);
+      rebuildRules().then(function () {
+        chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
+      });
     });
   }
 });
@@ -197,7 +244,12 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
 // ----------------------------------------------------------------------------
 
 async function allowDomain(domain, target, tabId, always) {
-  if (domain) sessionAllowed.add(domain);
+  if (domain && tabId != null) {
+    if (!sessionAllowed[tabId]) {
+      sessionAllowed[tabId] = new Set();
+    }
+    sessionAllowed[tabId].add(domain);
+  }
   if (always && domain) {
     var data = await chrome.storage.local.get(TRUSTED_KEY);
     var list = (data && data[TRUSTED_KEY]) || [];
@@ -214,6 +266,7 @@ async function allowDomain(domain, target, tabId, always) {
 function cancelGuard(tabId) {
   if (tabId == null) return;
   guardedTabs.delete(tabId);
+  delete sessionAllowed[tabId];
   rebuildRules();
   chrome.tabs.goBack(tabId, function () {
     if (chrome.runtime.lastError) {

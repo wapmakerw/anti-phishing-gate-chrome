@@ -1,6 +1,8 @@
 const fs = require("fs");
 const path = require("path");
 
+let mockTabUrls = {};
+
 // Mock the global chrome APIs
 const mockChrome = {
   runtime: {
@@ -15,7 +17,7 @@ const mockChrome = {
   },
   tabs: {
     query: jest.fn((queryInfo, cb) => cb([])),
-    get: jest.fn((id, cb) => cb({ id, url: "" })),
+    get: jest.fn((id, cb) => cb({ id, url: mockTabUrls[id] || "" })),
     update: jest.fn(() => Promise.resolve()),
     goBack: jest.fn((id, cb) => cb && cb()),
     remove: jest.fn((id, cb) => cb && cb()),
@@ -25,8 +27,14 @@ const mockChrome = {
   },
   storage: {
     local: {
-      get: jest.fn((keys, cb) => cb({})),
-      set: jest.fn((obj, cb) => cb && cb())
+      get: jest.fn((keys, cb) => {
+        if (typeof cb === "function") return cb({});
+        return Promise.resolve({});
+      }),
+      set: jest.fn((obj, cb) => {
+        if (typeof cb === "function") return cb();
+        return Promise.resolve();
+      })
     },
     onChanged: { addListener: jest.fn() }
   },
@@ -57,12 +65,20 @@ eval(bgCode);
 const calls = mockChrome.webNavigation.onErrorOccurred.addListener.mock.calls;
 const onErrorOccurredCallback = calls[calls.length - 1][0];
 
+const storageCalls = mockChrome.storage.onChanged.addListener.mock.calls;
+const storageCallback = storageCalls[storageCalls.length - 1][0];
+
 describe("Background Service Worker Redirect Flow", () => {
   let ruleUpdates = [];
 
   beforeEach(() => {
     jest.clearAllMocks();
     ruleUpdates = [];
+    mockTabUrls = {};
+    sandboxList = [];
+    trustedList = [];
+    sessionAllowed = {};
+    activeRuleIds = new Set();
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -102,7 +118,7 @@ describe("Background Service Worker Redirect Flow", () => {
 
     // Verify rules were updated to exclude redirect1.com
     const lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
-    const blockRule = lastRuleUpdate.addRules.find(r => r.id === BLOCK_GUARDED_RULE_ID);
+    const blockRule = lastRuleUpdate.addRules.find(r => r.id === 1000 + targetTabId);
     expect(blockRule.condition.excludedRequestDomains).toContain("redirect1.com");
 
     // Verify background script updated the tab to continue the navigation to redirect1.com
@@ -130,4 +146,205 @@ describe("Background Service Worker Redirect Flow", () => {
       })
     );
   });
+
+  test("Untrust domain: removes domain from sessionAllowed when removed from trusted list", async () => {
+    // Simulate user trusting a domain
+    await allowDomain("trusted-domain.com", "https://trusted-domain.com", 42, true);
+
+    // Verify it is excluded
+    let lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    let blockRule = lastRuleUpdate.addRules.find(r => r.id === 1000 + 42);
+    expect(blockRule.condition.excludedRequestDomains).toContain("trusted-domain.com");
+
+    // Simulate user untrusting the domain (removing it from storage)
+    ruleUpdates = [];
+    storageCallback({
+      trustedDomains: {
+        oldValue: ["trusted-domain.com"],
+        newValue: []
+      }
+    }, "local");
+
+    // Verify it is no longer excluded
+    lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    blockRule = lastRuleUpdate.addRules.find(r => r.id === 1000 + 42);
+    expect(blockRule.condition.excludedRequestDomains).not.toContain("trusted-domain.com");
+  });
+
+  test("HTTP Redirect scenario with Always Trust: next hops are still blocked", async () => {
+    const targetTabId = 99;
+
+    // Simulate Hop 1 blocked
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: targetTabId,
+      url: "https://always1.com/link",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    mockChrome.tabs.update.mockClear();
+    ruleUpdates = [];
+
+    // Simulate clicking "Always trust" and "Continue"
+    await allowDomain("always1.com", "https://always1.com/link", targetTabId, true);
+
+    // Verify rules were updated to exclude always1.com
+    let lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    let blockRule = lastRuleUpdate.addRules.find(r => r.id === 1000 + targetTabId);
+    expect(blockRule.condition.excludedRequestDomains).toContain("always1.com");
+
+    // Simulate storage.onChanged event that is triggered by the write
+    ruleUpdates = [];
+    storageCallback({
+      trustedDomains: {
+        oldValue: [],
+        newValue: ["always1.com"]
+      }
+    }, "local");
+
+    // Because trustedList was already updated, no new rules should be rebuilt (avoiding race conditions)
+    expect(ruleUpdates.length).toBe(0);
+
+    // Simulate Hop 2 to always2.com
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: targetTabId,
+      url: "https://always2.com/link",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    // Verify second hop is still blocked and triggers confirmation page
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      targetTabId,
+      expect.objectContaining({
+        url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Falways2.com%2Flink")
+      })
+    );
+  });
+
+  test("Ezoic redirect scenario: only trusted domain is trusted, others show popup", async () => {
+    const targetTabId = 100;
+
+    // 1. Navigation to r.marketing.ezoic.com is blocked
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: targetTabId,
+      url: "https://r.marketing.ezoic.com/mk/cl/f/sh/7nVU1aA2nfuMSqHSMTa8h0lSVGSAuk0/jKPEO9LfVeGS",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    // Verify it updates to confirmation page
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      targetTabId,
+      expect.objectContaining({
+        url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fr.marketing.ezoic.com")
+      })
+    );
+
+    mockChrome.tabs.update.mockClear();
+    ruleUpdates = [];
+
+    // 2. User trusts r.marketing.ezoic.com
+    await allowDomain(
+      "r.marketing.ezoic.com",
+      "https://r.marketing.ezoic.com/mk/cl/f/sh/7nVU1aA2nfuMSqHSMTa8h0lSVGSAuk0/jKPEO9LfVeGS",
+      targetTabId,
+      true
+    );
+
+    // Verify rules exclude r.marketing.ezoic.com
+    let lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    let blockRule = lastRuleUpdate.addRules.find(r => r.id === 1000 + targetTabId);
+    expect(blockRule.condition.excludedRequestDomains).toContain("r.marketing.ezoic.com");
+
+    // Simulate storage.onChanged (no-op now since already updated)
+    ruleUpdates = [];
+    storageCallback({
+      trustedDomains: {
+        oldValue: [],
+        newValue: ["r.marketing.ezoic.com"]
+      }
+    }, "local");
+    expect(ruleUpdates.length).toBe(0);
+
+    // 3. Page redirects via JS to www.adweek.com (which should be blocked)
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: targetTabId,
+      url: "https://www.adweek.com/media/how-ranker-grew-revenue-fourfold-thanks-to-its-first-party-data-play/?utm_source=brevo&utm_campaign=Marketing Newsletter  no 1  MAR26  2025 &utm_medium=email&utm_id=1337",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    // Verify www.adweek.com is blocked and redirects to confirmation page
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      targetTabId,
+      expect.objectContaining({
+        url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fwww.adweek.com")
+      })
+    );
+  });
+
+  test("Tab isolation and navigation reset scenario", async () => {
+    // Enable a sandbox domain
+    sandboxList = ["sandbox.com"];
+
+    const tab1 = 101;
+    const tab2 = 102;
+
+    // Simulate Tab 1 starting navigation from sandbox
+    mockTabUrls[tab1] = "https://sandbox.com/page1";
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: tab1,
+      url: "https://domain1.com/link",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    // Tab 1 allows domain1.com
+    await allowDomain("domain1.com", "https://domain1.com/link", tab1);
+
+    // Verify Tab 1 excludes domain1.com
+    let lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    let tab1Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab1);
+    expect(tab1Rule.condition.excludedRequestDomains).toContain("domain1.com");
+
+    // Simulate Tab 2 starting navigation from sandbox
+    mockTabUrls[tab2] = "https://sandbox.com/page2";
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: tab2,
+      url: "https://domain2.com/link",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    // Tab 2 allows domain2.com
+    await allowDomain("domain2.com", "https://domain2.com/link", tab2);
+
+    // Verify Tab 2 excludes domain2.com but NOT domain1.com (tab isolation)
+    lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    let tab2Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab2);
+    expect(tab2Rule.condition.excludedRequestDomains).toContain("domain2.com");
+    expect(tab2Rule.condition.excludedRequestDomains).not.toContain("domain1.com");
+
+    // Verify Tab 1 still excludes domain1.com and NOT domain2.com
+    tab1Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab1);
+    expect(tab1Rule.condition.excludedRequestDomains).toContain("domain1.com");
+    expect(tab1Rule.condition.excludedRequestDomains).not.toContain("domain2.com");
+
+    // Simulate Tab 1 navigating back to sandbox and starting a fresh navigation
+    mockTabUrls[tab1] = "https://sandbox.com/page1";
+    ruleUpdates = [];
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: tab1,
+      url: "https://domain1.com/link", // Try to navigate again
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+
+    // Since it was a new navigation from sandbox, the session allowed list for Tab 1 should be reset
+    lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    tab1Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab1);
+    expect(tab1Rule.condition.excludedRequestDomains).not.toContain("domain1.com");
+  });
 });
+
