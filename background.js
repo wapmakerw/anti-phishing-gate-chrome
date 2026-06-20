@@ -30,7 +30,6 @@ var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
 // In-memory guard state (session scoped).
 var guardedTabs = new Set();      // tab ids whose navigation we gate
 var sessionAllowed = {};          // tabId -> Set of domains authorized this session
-var activeRuleIds = new Set();    // active declarativeNetRequest session rule IDs
 var sandboxList = [];             // cached copy of SANDBOX_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
@@ -130,10 +129,9 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 // declarativeNetRequest gating rules
 // ----------------------------------------------------------------------------
 
-function rebuildRules() {
+async function rebuildRules() {
   var tabIds = Array.from(guardedTabs);
   var addRules = [];
-  var newRuleIds = new Set();
 
   // 1. Guarded tabs block rules (one rule per guarded tab)
   for (var i = 0; i < tabIds.length; i++) {
@@ -152,7 +150,6 @@ function rebuildRules() {
         excludedRequestDomains: excludedDomains
       }
     });
-    newRuleIds.add(ruleId);
   }
 
   // 2. Initiator-based sandbox block rule
@@ -168,11 +165,16 @@ function rebuildRules() {
         excludedRequestDomains: excludedDomainsForSandbox
       }
     });
-    newRuleIds.add(BLOCK_SANDBOX_RULE_ID);
   }
 
-  var removeRuleIds = Array.from(activeRuleIds);
-  activeRuleIds = newRuleIds;
+  // Get currently registered session rules to ensure we remove them cleanly
+  var existingRules = [];
+  try {
+    existingRules = await chrome.declarativeNetRequest.getSessionRules();
+  } catch (e) {
+    // Fallback if not supported or fails
+  }
+  var removeRuleIds = (existingRules || []).map(function (r) { return r.id; });
 
   return chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: removeRuleIds,
@@ -204,18 +206,20 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
     
     var tabId = details.tabId;
     
-    chrome.tabs.get(tabId, function (tab) {
-      if (!chrome.runtime.lastError && tab && tab.url) {
-        var currentHost = hostOf(tab.url);
-        if (currentHost && sandboxList.indexOf(currentHost) !== -1) {
-          // Reset session-allowed domains for this tab on fresh navigation from sandbox
-          sessionAllowed[tabId] = new Set();
+    return new Promise(function (resolve) {
+      chrome.tabs.get(tabId, function (tab) {
+        if (!chrome.runtime.lastError && tab && tab.url) {
+          var currentHost = hostOf(tab.url);
+          if (currentHost && sandboxList.indexOf(currentHost) !== -1) {
+            // Reset session-allowed domains for this tab on fresh navigation from sandbox
+            sessionAllowed[tabId] = new Set();
+          }
         }
-      }
-      
-      guardedTabs.add(tabId);
-      rebuildRules().then(function () {
-        chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
+        
+        guardedTabs.add(tabId);
+        resolve(rebuildRules().then(function () {
+          return chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
+        }));
       });
     });
   }

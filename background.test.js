@@ -39,7 +39,8 @@ const mockChrome = {
     onChanged: { addListener: jest.fn() }
   },
   declarativeNetRequest: {
-    updateSessionRules: jest.fn(() => Promise.resolve())
+    updateSessionRules: jest.fn(() => Promise.resolve()),
+    getSessionRules: jest.fn(() => Promise.resolve([]))
   },
   webNavigation: {
     onErrorOccurred: { addListener: jest.fn() },
@@ -78,7 +79,6 @@ describe("Background Service Worker Redirect Flow", () => {
     sandboxList = [];
     trustedList = [];
     sessionAllowed = {};
-    activeRuleIds = new Set();
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -164,6 +164,8 @@ describe("Background Service Worker Redirect Flow", () => {
         newValue: []
       }
     }, "local");
+
+    await new Promise(resolve => setTimeout(resolve, 0));
 
     // Verify it is no longer excluded
     lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];

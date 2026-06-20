@@ -11,7 +11,6 @@
     currentDomain: document.getElementById("currentDomain"),
     status: document.getElementById("status"),
     toggleBtn: document.getElementById("toggleBtn"),
-    trustBtn: document.getElementById("trustBtn"),
     list: document.getElementById("domainList"),
     count: document.getElementById("count"),
     emptyHint: document.getElementById("emptyHint"),
@@ -79,10 +78,8 @@
         els.status.textContent = "This page can't be managed.";
         els.status.className = "status off";
         els.toggleBtn.disabled = true;
-        els.trustBtn.disabled = true;
       } else {
         els.toggleBtn.disabled = false;
-        els.trustBtn.disabled = false;
 
         if (inSandbox) {
           els.status.textContent = "Protected — external links are confirmed.";
@@ -97,9 +94,6 @@
 
         els.toggleBtn.textContent = inSandbox ? "Remove from sandbox" : "Add to sandbox";
         els.toggleBtn.classList.toggle("remove", inSandbox);
-
-        els.trustBtn.textContent = inTrusted ? "Untrust" : "Mark trusted";
-        els.trustBtn.classList.toggle("remove", inTrusted);
       }
 
       renderList(els.list, els.count, els.emptyHint, sandbox, SANDBOX_KEY);
@@ -109,9 +103,6 @@
 
   els.toggleBtn.addEventListener("click", function () {
     toggle(SANDBOX_KEY, render);
-  });
-  els.trustBtn.addEventListener("click", function () {
-    toggle(TRUSTED_KEY, render);
   });
 
   // Resolve the active tab's domain, then render.
