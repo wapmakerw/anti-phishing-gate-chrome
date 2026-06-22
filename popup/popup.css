@@ -249,3 +249,38 @@ body {
   line-height: 1.5;
   margin: 4px 0 0;
 }
+
+.backup-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.backup-btn {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #fff;
+  color: var(--text);
+}
+
+.backup-btn:hover {
+  border-color: var(--green);
+}
+
+.backup-status {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.backup-status.ok {
+  color: var(--green);
+}
+
+.backup-status.err {
+  color: var(--red);
+}

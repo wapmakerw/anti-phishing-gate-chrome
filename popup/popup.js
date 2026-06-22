@@ -21,7 +21,11 @@
     trustedEmptyHint: document.getElementById("trustedEmptyHint"),
     manualForm: document.getElementById("manualAdd"),
     manualInput: document.getElementById("manualDomain"),
-    manualError: document.getElementById("manualError")
+    manualError: document.getElementById("manualError"),
+    exportBtn: document.getElementById("exportBtn"),
+    importBtn: document.getElementById("importBtn"),
+    importFile: document.getElementById("importFile"),
+    backupStatus: document.getElementById("backupStatus")
   };
 
   var currentDomain = null;
@@ -163,6 +167,159 @@
 
   els.manualInput.addEventListener("input", function () {
     if (!els.manualError.hidden) showManualError("");
+  });
+
+  // --------------------------------------------------------------------------
+  // Export / import (CSV)
+  //
+  // One file covers both lists. Each row is `type,domain` where type is
+  // "gated" or "trusted", e.g.
+  //   type,domain
+  //   gated,example.com
+  //   trusted,partner.com
+  // --------------------------------------------------------------------------
+
+  function showBackupStatus(message, ok) {
+    els.backupStatus.textContent = message;
+    els.backupStatus.className = "backup-status " + (ok ? "ok" : "err");
+    els.backupStatus.hidden = false;
+  }
+
+  function dateStamp() {
+    var d = new Date();
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  }
+
+  // Domains never contain commas/quotes, but quote defensively if they ever do.
+  function csvEscape(value) {
+    return /[",\n\r]/.test(value)
+      ? '"' + value.replace(/"/g, '""') + '"'
+      : value;
+  }
+
+  function buildCsv(gate, trusted) {
+    var rows = ["type,domain"];
+    gate.slice().sort().forEach(function (d) { rows.push("gated," + csvEscape(d)); });
+    trusted.slice().sort().forEach(function (d) { rows.push("trusted," + csvEscape(d)); });
+    return rows.join("\r\n") + "\r\n";
+  }
+
+  // Split a single CSV line into fields, honoring quoted values.
+  function parseCsvLine(line) {
+    var fields = [];
+    var cur = "";
+    var inQuotes = false;
+    for (var i = 0; i < line.length; i++) {
+      var c = line.charAt(i);
+      if (inQuotes) {
+        if (c === '"') {
+          if (line.charAt(i + 1) === '"') { cur += '"'; i++; }
+          else inQuotes = false;
+        } else {
+          cur += c;
+        }
+      } else if (c === '"') {
+        inQuotes = true;
+      } else if (c === ",") {
+        fields.push(cur);
+        cur = "";
+      } else {
+        cur += c;
+      }
+    }
+    fields.push(cur);
+    return fields;
+  }
+
+  // Parse CSV text into deduped gate/trusted host lists, counting rows we drop.
+  function parseCsv(text) {
+    var result = { gate: [], trusted: [], invalid: 0, skipped: 0 };
+    var lines = String(text).split(/\r\n|\r|\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line) continue;
+
+      var fields = parseCsvLine(line);
+      var type = (fields[0] || "").trim().toLowerCase();
+      var rawDomain = (fields[1] || "").trim();
+
+      // Skip an optional header row.
+      if (i === 0 && type === "type" && rawDomain.toLowerCase() === "domain") continue;
+
+      var target;
+      if (type === "gated" || type === "gate" || type === "sandbox") target = result.gate;
+      else if (type === "trusted" || type === "trust") target = result.trusted;
+      else { result.skipped++; continue; }
+
+      var v = normalizeAndValidate(rawDomain);
+      if (v.error) { result.invalid++; continue; }
+      if (target.indexOf(v.host) === -1) target.push(v.host);
+    }
+    return result;
+  }
+
+  els.exportBtn.addEventListener("click", function () {
+    getState(function (gate, trusted) {
+      var blob = new Blob([buildCsv(gate, trusted)], { type: "text/csv" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "anti-phishing-gate-rules-" + dateStamp() + ".csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      showBackupStatus(
+        "Exported " + gate.length + " gated and " + trusted.length + " trusted domain(s).",
+        true
+      );
+    });
+  });
+
+  els.importBtn.addEventListener("click", function () {
+    els.importFile.click();
+  });
+
+  els.importFile.addEventListener("change", function () {
+    var file = els.importFile.files && els.importFile.files[0];
+    if (!file) return;
+
+    var reader = new FileReader();
+    reader.onload = function () {
+      var parsed = parseCsv(reader.result);
+      if (!parsed.gate.length && !parsed.trusted.length) {
+        showBackupStatus("No valid domains found in that file.", false);
+        els.importFile.value = "";
+        return;
+      }
+      getState(function (gate, trusted) {
+        var addedGate = 0;
+        var nextGate = gate.slice();
+        parsed.gate.forEach(function (d) {
+          if (nextGate.indexOf(d) === -1) { nextGate.push(d); addedGate++; }
+        });
+        var addedTrusted = 0;
+        var nextTrusted = trusted.slice();
+        parsed.trusted.forEach(function (d) {
+          if (nextTrusted.indexOf(d) === -1) { nextTrusted.push(d); addedTrusted++; }
+        });
+        setKey(GATE_KEY, nextGate, function () {
+          setKey(TRUSTED_KEY, nextTrusted, function () {
+            var parts = ["Imported " + addedGate + " gated, " + addedTrusted + " trusted."];
+            if (parsed.invalid) parts.push(parsed.invalid + " invalid skipped.");
+            showBackupStatus(parts.join(" "), true);
+            render();
+          });
+        });
+      });
+      els.importFile.value = "";
+    };
+    reader.onerror = function () {
+      showBackupStatus("Could not read that file.", false);
+      els.importFile.value = "";
+    };
+    reader.readAsText(file);
   });
 
   // Resolve the active tab's domain, then render.

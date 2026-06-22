@@ -78,6 +78,26 @@ Common infrastructure and technical labels (`www`, `api`, `cdn`, `i18n`, `v2`,
 …) are allowlisted to cut false positives. This is a heuristic second-look
 prompt, not an authoritative verdict, so it *informs* rather than blocks.
 
+### Backup: CSV export / import
+
+The popup's **Backup** section exports both lists to a single CSV file and
+imports them back — useful for moving your setup to another machine or sharing
+a baseline list. The format is one `type,domain` row per host:
+
+```csv
+type,domain
+gated,app.example.com
+trusted,sso.example.com
+```
+
+**Export** downloads `anti-phishing-gate-rules-YYYY-MM-DD.csv`. **Import**
+**merges** (union) the file into your current lists — existing entries are kept,
+duplicates are ignored, and every imported host is run through the same
+validation as the manual-add field. The optional header row is recognized; rows
+with an unknown `type` are skipped and invalid hosts are dropped, with both
+counts reported in the status line. No new permissions are required — export
+uses a `Blob` download and import reads the file locally via `FileReader`.
+
 ### Redirectors and phishing
 
 Phishing mail often hides the real target behind a redirector so the visible
@@ -153,8 +173,9 @@ confirm/
 popup/
   popup.html/.css/.js  Toolbar UI: current domain, add/remove + trust/untrust
                        toggles, a validated "add a domain" input to gate any
-                       host manually (not just the current tab), and both lists
-                       with per-item removal.
+                       host manually (not just the current tab), both lists
+                       with per-item removal, and CSV export/import of both
+                       lists (Backup section).
 scripts/
   build.sh             Validates sources and packages dist/ (unpacked + zip).
 icons/

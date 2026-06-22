@@ -59,6 +59,20 @@
       </p>
     </section>
 
+    <section class="list-section backup">
+      <div class="list-header"><span>Backup</span></div>
+      <p class="section-hint">
+        Export your gated and trusted domains to a CSV file, or import them from
+        one. Importing merges into your current lists.
+      </p>
+      <div class="backup-actions">
+        <button id="exportBtn" class="backup-btn" type="button">Export CSV</button>
+        <button id="importBtn" class="backup-btn" type="button">Import CSV</button>
+        <input id="importFile" type="file" accept=".csv,text/csv" hidden />
+      </div>
+      <p id="backupStatus" class="backup-status" hidden></p>
+    </section>
+
     <script src="../lib/domain.js"></script>
     <script src="popup.js"></script>
   </body>
