@@ -60,16 +60,23 @@ sandboxed.
 
 Wherever a host is shown to you — the **confirmation interstitial** for a
 destination, and the **toolbar popup** for the current site — the extension adds
-an extra **look-alike-domain notice** when the host name appears to be a trap:
+an extra **look-alike-domain notice** listing each reason the host name looks
+like it could be a trap. `confusableRisk()` in `lib/domain.js` checks for:
 
-- a label that **mixes letters with look-alike digits** (`0`↔`o`, `1`↔`l`/`i`),
-  e.g. `g00gle.com`, `paypa1.com`, `amaz0n.co`; or
-- **international / punycode characters** (`xn--…`, Cyrillic/Greek glyphs) that
-  can imitate a familiar name.
+- **letters mixed with look-alike digits** (`0`↔`o`, `1`↔`l`/`i`), e.g.
+  `g00gle.com`, `paypa1.com`, `amaz0n.co`;
+- **international / punycode characters** (`xn--…`, Cyrillic/Greek glyphs) and
+  **mixed writing systems** in one label — the strongest homograph signals;
+- **invisible, bidirectional-control, or control characters** that can hide or
+  reorder the real name;
+- **IP-address literals**, unusually deep subdomain nesting, and odd label
+  shapes (leading/trailing hyphens, double hyphens, over-long labels); and
+- with an optional **watchlist** of names you protect, hosts that are a close
+  edit-distance or confusable match to one of them.
 
-This is a heuristic second-look prompt (`confusableRisk()` in `lib/domain.js`),
-not an authoritative verdict — legitimate hosts can contain digits — so it
-*informs* rather than blocks.
+Common infrastructure and technical labels (`www`, `api`, `cdn`, `i18n`, `v2`,
+…) are allowlisted to cut false positives. This is a heuristic second-look
+prompt, not an authoritative verdict, so it *informs* rather than blocks.
 
 ### Redirectors and phishing
 
