@@ -39,6 +39,15 @@ var trustedList = [];             // cached copy of TRUSTED_KEY
 function hostOf(url) {
   return domainLib.hostOf(url);
 }
+
+// chrome.tabs.update rejects with "No tab with id: N" when the tab was closed
+// before we could redirect it — routine during redirect chains. Swallow that
+// specific failure so it doesn't surface as an uncaught promise rejection.
+function safeTabUpdate(tabId, props) {
+  return Promise.resolve(chrome.tabs.update(tabId, props)).catch(function () {
+    // Tab is gone; nothing left to navigate.
+  });
+}
 function uniq(arr) {
   var out = [];
   for (var i = 0; i < arr.length; i++) {
@@ -151,7 +160,21 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 // declarativeNetRequest gating rules
 // ----------------------------------------------------------------------------
 
-async function rebuildRules() {
+// Serialize rule rebuilds. rebuildRules() is fired from many independent events
+// (storage changes, navigation, allow/cancel) without always being awaited. If
+// two rebuilds overlap, the second can read the session rules before the first
+// commits, omit the rule the first just added from its removeRuleIds, and then
+// try to re-add that same id — which Chrome rejects with "does not have a unique
+// ID". Chaining every rebuild guarantees one runs at a time.
+var rebuildQueue = Promise.resolve();
+function rebuildRules() {
+  var run = rebuildQueue.then(doRebuildRules, doRebuildRules);
+  // Keep the queue alive even if this run rejects, so later rebuilds still fire.
+  rebuildQueue = run.catch(function () {});
+  return run;
+}
+
+async function doRebuildRules() {
   var tabIds = Array.from(guardedTabs);
   var addRules = [];
 
@@ -251,7 +274,7 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
         
         guardedTabs.add(tabId);
         resolve(rebuildRules().then(function () {
-          return chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
+          return safeTabUpdate(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
         }));
       });
     });
@@ -342,7 +365,7 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
   ) {
     guardTab(tabId);
     tabOriginHost[tabId] = newHost;
-    chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(details.url) });
+    safeTabUpdate(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(details.url) });
     return;
   }
 
@@ -387,7 +410,7 @@ async function allowDomain(domain, target, tabId, always) {
     }
   }
   await rebuildRules();
-  if (tabId != null && target) await chrome.tabs.update(tabId, { url: target });
+  if (tabId != null && target) await safeTabUpdate(tabId, { url: target });
 }
 
 function cancelGuard(tabId) {

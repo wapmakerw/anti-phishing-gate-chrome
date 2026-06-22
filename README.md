@@ -173,6 +173,14 @@ and `trustedDomains` (destination allowlist) — each an array of **host** strin
 lives in memory in the worker and drives the `declarativeNetRequest` session
 rules; "always trust" choices are persisted to `trustedDomains`.
 
+Rule rebuilds are **serialized** through a single promise chain (`rebuildRules`
+→ `doRebuildRules`): the worker reacts to many independent events that each
+rebuild the session rules, and overlapping `updateSessionRules` calls would
+otherwise race — the second reading the rule set before the first commits and
+re-adding an id that already exists (`"... does not have a unique ID"`).
+Tab redirects go through `safeTabUpdate`, which swallows the routine
+`"No tab with id"` rejection when a tab is closed mid-navigation.
+
 ## Build / package
 
 No transpilation step — the source is plain MV3 JS/CSS/HTML. The build script
