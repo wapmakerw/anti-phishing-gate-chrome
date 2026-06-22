@@ -52,7 +52,7 @@ const mockChrome = {
 
 global.chrome = mockChrome;
 global.self = global;
-global.SandboxDomain = require("./lib/domain");
+global.GateDomain = require("./lib/domain");
 
 // Mock importScripts for background.js
 global.importScripts = jest.fn(file => {
@@ -84,11 +84,11 @@ describe("Background Service Worker Redirect Flow", () => {
     jest.clearAllMocks();
     ruleUpdates = [];
     mockTabUrls = {};
-    sandboxList = [];
+    gateList = [];
     trustedList = [];
     sessionAllowed = {};
     tabOriginHost = {};
-    pendingSandboxNav = {};
+    pendingGateNav = {};
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -98,7 +98,7 @@ describe("Background Service Worker Redirect Flow", () => {
   });
 
   test("HTTP Redirect scenario: prompts user for every untrusted redirect hop", async () => {
-    // Scenario: User is navigating from a sandboxed domain.
+    // Scenario: User is navigating from a gated domain.
     // The initial link redirects through redirect1.com -> redirect2.com.
     // Each untrusted hop should trigger a block and redirect to confirm.html.
 
@@ -296,13 +296,13 @@ describe("Background Service Worker Redirect Flow", () => {
     );
   });
 
-  test("Address-bar navigation to a sandboxed redirector guards the tab and gates the redirect", async () => {
-    // urldefense.com is sandboxed; the user pastes a urldefense link in the
-    // address bar (typed transition, no sandbox initiator).
-    sandboxList = ["urldefense.com"];
+  test("Address-bar navigation to a gated redirector guards the tab and gates the redirect", async () => {
+    // urldefense.com is gated; the user pastes a urldefense link in the
+    // address bar (typed transition, no gate initiator).
+    gateList = ["urldefense.com"];
     const tabId = 300;
 
-    // onBeforeNavigate to the sandboxed host fires before it loads.
+    // onBeforeNavigate to the gated host fires before it loads.
     onBeforeNavigateCallback({
       frameId: 0,
       tabId: tabId,
@@ -310,7 +310,7 @@ describe("Background Service Worker Redirect Flow", () => {
     });
 
     // The tab is guarded before the page loads, and its per-tab rule excludes
-    // the sandboxed host (so urldefense.com itself loads) but not other hosts.
+    // the gated host (so urldefense.com itself loads) but not other hosts.
     expect(guardedTabs.has(tabId)).toBe(true);
     await new Promise(resolve => setTimeout(resolve, 0));
     let rule = ruleUpdates[ruleUpdates.length - 1].addRules.find(r => r.id === 1000 + tabId);
@@ -318,7 +318,7 @@ describe("Background Service Worker Redirect Flow", () => {
     expect(rule.condition.excludedRequestDomains).toContain("urldefense.com");
 
     // urldefense.com 302-redirects onward; the request to evil.example is on the
-    // sandboxed page, so DNR blocks it and we show the confirmation page.
+    // gated page, so DNR blocks it and we show the confirmation page.
     mockTabUrls[tabId] = "https://urldefense.com/v3/__https://evil.example/__;!!abc$";
     mockChrome.tabs.update.mockClear();
     await onErrorOccurredCallback({
@@ -335,18 +335,18 @@ describe("Background Service Worker Redirect Flow", () => {
     );
   });
 
-  test("Server-side redirect race: gates the landing when the sandboxed redirector bounces us before the rule lands", async () => {
-    // urldefense.com is sandboxed; the per-tab DNR rule loses the race against
+  test("Server-side redirect race: gates the landing when the gated redirector bounces us before the rule lands", async () => {
+    // urldefense.com is gated; the per-tab DNR rule loses the race against
     // its immediate 302, so the tab COMMITS on evil.example. The onCommitted
     // fallback must catch the mismatch and redirect to the confirmation page.
-    sandboxList = ["urldefense.com"];
+    gateList = ["urldefense.com"];
     const tabId = 310;
 
     onBeforeNavigateCallback({
       frameId: 0, tabId,
       url: "https://urldefense.com/v3/__https://evil.example/__;!!abc$"
     });
-    expect(pendingSandboxNav[tabId]).toBe("urldefense.com");
+    expect(pendingGateNav[tabId]).toBe("urldefense.com");
 
     mockChrome.tabs.update.mockClear();
     onCommittedCallback({
@@ -364,11 +364,11 @@ describe("Background Service Worker Redirect Flow", () => {
     );
     expect(guardedTabs.has(tabId)).toBe(true);
     // The pending intent is consumed exactly once.
-    expect(pendingSandboxNav[tabId]).toBeUndefined();
+    expect(pendingGateNav[tabId]).toBeUndefined();
   });
 
-  test("Sandboxed redirector landing on a TRUSTED host does not prompt", async () => {
-    sandboxList = ["urldefense.com"];
+  test("Gated redirector landing on a TRUSTED host does not prompt", async () => {
+    gateList = ["urldefense.com"];
     trustedList = ["partner.com"];
     const tabId = 311;
 
@@ -389,11 +389,11 @@ describe("Background Service Worker Redirect Flow", () => {
     expect(mockChrome.tabs.update).not.toHaveBeenCalled();
   });
 
-  test("Committing on a sandboxed domain guards the tab (onCommitted backstop)", async () => {
-    sandboxList = ["bank.com"];
+  test("Committing on a gated domain guards the tab (onCommitted backstop)", async () => {
+    gateList = ["bank.com"];
     const tabId = 200;
 
-    // The tab lands on the sandboxed page (worker missed onBeforeNavigate).
+    // The tab lands on the gated page (worker missed onBeforeNavigate).
     onCommittedCallback({
       frameId: 0,
       tabId: tabId,
@@ -402,19 +402,19 @@ describe("Background Service Worker Redirect Flow", () => {
       transitionQualifiers: []
     });
 
-    // Landing on the sandboxed host guards the tab, so any onward hop is gated.
+    // Landing on the gated host guards the tab, so any onward hop is gated.
     expect(guardedTabs.has(tabId)).toBe(true);
     await new Promise(resolve => setTimeout(resolve, 0));
     const lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
     expect(lastRuleUpdate.addRules.some(r => r.id === 1000 + tabId)).toBe(true);
   });
 
-  test("Direct link leaving a sandboxed page guards even if the landing was missed", async () => {
-    sandboxList = ["bank.com"];
+  test("Direct link leaving a gated page guards even if the landing was missed", async () => {
+    gateList = ["bank.com"];
     const tabId = 201;
 
-    // Pretend the tab was already on the sandboxed page but never got guarded
-    // (e.g. it was already open when the domain was sandboxed).
+    // Pretend the tab was already on the gated page but never got guarded
+    // (e.g. it was already open when the domain was gated).
     tabOriginHost[tabId] = "bank.com";
     expect(guardedTabs.has(tabId)).toBe(false);
 
@@ -426,8 +426,8 @@ describe("Background Service Worker Redirect Flow", () => {
     expect(guardedTabs.has(tabId)).toBe(true);
   });
 
-  test("Navigations that never touch a sandboxed host do not guard the tab", async () => {
-    sandboxList = ["bank.com"];
+  test("Navigations that never touch a gated host do not guard the tab", async () => {
+    gateList = ["bank.com"];
     const tabId = 202;
 
     onCommittedCallback({
@@ -446,14 +446,14 @@ describe("Background Service Worker Redirect Flow", () => {
   });
 
   test("Tab isolation and navigation reset scenario", async () => {
-    // Enable a sandbox domain
-    sandboxList = ["sandbox.com"];
+    // Enable a gate domain
+    gateList = ["gate.com"];
 
     const tab1 = 101;
     const tab2 = 102;
 
-    // Simulate Tab 1 starting navigation from sandbox
-    mockTabUrls[tab1] = "https://sandbox.com/page1";
+    // Simulate Tab 1 starting navigation from gate
+    mockTabUrls[tab1] = "https://gate.com/page1";
     await onErrorOccurredCallback({
       frameId: 0,
       tabId: tab1,
@@ -469,8 +469,8 @@ describe("Background Service Worker Redirect Flow", () => {
     let tab1Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab1);
     expect(tab1Rule.condition.excludedRequestDomains).toContain("domain1.com");
 
-    // Simulate Tab 2 starting navigation from sandbox
-    mockTabUrls[tab2] = "https://sandbox.com/page2";
+    // Simulate Tab 2 starting navigation from gate
+    mockTabUrls[tab2] = "https://gate.com/page2";
     await onErrorOccurredCallback({
       frameId: 0,
       tabId: tab2,
@@ -492,8 +492,8 @@ describe("Background Service Worker Redirect Flow", () => {
     expect(tab1Rule.condition.excludedRequestDomains).toContain("domain1.com");
     expect(tab1Rule.condition.excludedRequestDomains).not.toContain("domain2.com");
 
-    // Simulate Tab 1 navigating back to sandbox and starting a fresh navigation
-    mockTabUrls[tab1] = "https://sandbox.com/page1";
+    // Simulate Tab 1 navigating back to gate and starting a fresh navigation
+    mockTabUrls[tab1] = "https://gate.com/page1";
     ruleUpdates = [];
     await onErrorOccurredCallback({
       frameId: 0,
@@ -502,7 +502,7 @@ describe("Background Service Worker Redirect Flow", () => {
       error: "net::ERR_BLOCKED_BY_CLIENT"
     });
 
-    // Since it was a new navigation from sandbox, the session allowed list for Tab 1 should be reset
+    // Since it was a new navigation from gate, the session allowed list for Tab 1 should be reset
     lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
     tab1Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab1);
     expect(tab1Rule.condition.excludedRequestDomains).not.toContain("domain1.com");

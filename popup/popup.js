@@ -1,11 +1,12 @@
-/* Popup logic: show the active tab's domain, toggle it in the sandbox list or
+/* Popup logic: show the active tab's domain, toggle it in the gate list or
    the trusted list, and render both lists with per-item removal. */
 (function () {
   "use strict";
 
-  var SANDBOX_KEY = "sandboxDomains";
+  // Legacy storage key name (kept so existing installs keep their gated list).
+  var GATE_KEY = "sandboxDomains";
   var TRUSTED_KEY = "trustedDomains";
-  var domainLib = self.SandboxDomain;
+  var domainLib = self.GateDomain;
 
   var els = {
     currentDomain: document.getElementById("currentDomain"),
@@ -26,9 +27,9 @@
   var currentDomain = null;
 
   function getState(cb) {
-    chrome.storage.local.get([SANDBOX_KEY, TRUSTED_KEY], function (data) {
+    chrome.storage.local.get([GATE_KEY, TRUSTED_KEY], function (data) {
       data = data || {};
-      cb((data[SANDBOX_KEY]) || [], (data[TRUSTED_KEY]) || []);
+      cb((data[GATE_KEY]) || [], (data[TRUSTED_KEY]) || []);
     });
   }
 
@@ -74,8 +75,8 @@
   }
 
   function render() {
-    getState(function (sandbox, trusted) {
-      var inSandbox = currentDomain && sandbox.indexOf(currentDomain) !== -1;
+    getState(function (gate, trusted) {
+      var inGate = currentDomain && gate.indexOf(currentDomain) !== -1;
       var inTrusted = currentDomain && trusted.indexOf(currentDomain) !== -1;
 
       if (!currentDomain) {
@@ -85,7 +86,7 @@
       } else {
         els.toggleBtn.disabled = false;
 
-        if (inSandbox) {
+        if (inGate) {
           els.status.textContent = "Protected — external links are confirmed.";
           els.status.className = "status on";
         } else if (inTrusted) {
@@ -96,17 +97,17 @@
           els.status.className = "status off";
         }
 
-        els.toggleBtn.textContent = inSandbox ? "Remove from sandbox" : "Add to sandbox";
-        els.toggleBtn.classList.toggle("remove", inSandbox);
+        els.toggleBtn.textContent = inGate ? "Stop gating" : "Gate this site";
+        els.toggleBtn.classList.toggle("remove", inGate);
       }
 
-      renderList(els.list, els.count, els.emptyHint, sandbox, SANDBOX_KEY);
+      renderList(els.list, els.count, els.emptyHint, gate, GATE_KEY);
       renderList(els.trustedList, els.trustedCount, els.trustedEmptyHint, trusted, TRUSTED_KEY);
     });
   }
 
   els.toggleBtn.addEventListener("click", function () {
-    toggle(SANDBOX_KEY, render);
+    toggle(GATE_KEY, render);
   });
 
   // Normalize free-form input to a host and validate its shape. Returns either
@@ -146,13 +147,13 @@
       showManualError(result.error);
       return;
     }
-    chrome.storage.local.get(SANDBOX_KEY, function (data) {
-      var list = (data && data[SANDBOX_KEY]) || [];
+    chrome.storage.local.get(GATE_KEY, function (data) {
+      var list = (data && data[GATE_KEY]) || [];
       if (list.indexOf(result.host) !== -1) {
-        showManualError('"' + result.host + '" is already sandboxed.');
+        showManualError('"' + result.host + '" is already gated.');
         return;
       }
-      setKey(SANDBOX_KEY, list.concat([result.host]), function () {
+      setKey(GATE_KEY, list.concat([result.host]), function () {
         els.manualInput.value = "";
         showManualError("");
         render();

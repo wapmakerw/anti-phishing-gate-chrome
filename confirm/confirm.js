@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var lib = self.SandboxDomain;
+  var lib = self.GateDomain;
   var DELAY_SECONDS = 5;
 
   // Everything after the first "d=" is the original target URL, verbatim.

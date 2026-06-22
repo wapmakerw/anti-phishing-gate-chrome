@@ -7,33 +7,33 @@
 <br clear="left">
 
 A Chrome extension (Manifest V3) that helps you **avoid phishing redirects**.
-(Packaged as `sandbox-link-guard` by the build script.)
+(Packaged as `antiphishing-gate` by the build script.)
 
 You mark sites you want to protect (your bank, your company portal, your
-webmail) as **sandboxed**. While you are on one of those sites, if a link tries
+webmail) as **gated**. While you are on one of those sites, if a link tries
 to open a **different host in a new window/tab**, the extension pauses and
 shows a confirmation modal that clearly displays the destination — so a
 malicious "click here to verify your account" link can't quietly whisk you off
 to a look-alike phishing site.
 
 Matching is at the **full host level** — `mail.example.com`, `app.example.com`
-and `example.com` are distinct. Sandboxing or trusting one does not cover the
+and `example.com` are distinct. Gating or trusting one does not cover the
 others.
 
 There are two lists:
 
-- **Sandboxed hosts** — sites where protection is *active*. While browsing
+- **Gated hosts** — sites where protection is *active*. While browsing
   these, links to any other host are confirmed.
 - **Trusted hosts** — destination allowlist. A link *to* one of these is
-  **never** prompted, even from a sandboxed site (e.g. trust your SSO provider
+  **never** prompted, even from a gated site (e.g. trust your SSO provider
   so legit logins don't nag you).
 
 ## How it works
 
-1. Open a site you want to protect and click the toolbar icon → **Add to
-   sandbox**. (Or **Mark trusted** to allowlist it as a destination.)
+1. Open a site you want to protect and click the toolbar icon → **Gate this
+   site**. (Or **Mark trusted** to allowlist it as a destination.)
 2. The **host** (e.g. `app.example.com`) is saved to `chrome.storage.local`.
-3. On any sandboxed page, the content script watches link clicks. When a click
+3. On any gated page, the content script watches link clicks. When a click
    would open a **different host** in a **new window** (`target="_blank"`,
    `Ctrl`/`Cmd`/`Shift`-click, or middle-click) **and that host isn't trusted**,
    it blocks the click and shows a confirmation modal. The URL is used
@@ -54,7 +54,7 @@ There are two lists:
    chain that passes through several hosts is confirmed at **each** one.
 
 The toolbar badge shows **ON** (green) when the current tab's domain is
-sandboxed.
+gated.
 
 ### Look-alike (homograph) domain warning
 
@@ -93,18 +93,18 @@ Instead it lets the browser navigate for real and gates every hop:
   redirector domain itself — as the navigation happens. No request is ever made
   until you've confirmed that hop.
 - **Same-tab navigation is guarded too — however you arrive.** The moment a tab
-  navigates **to** a sandboxed host — whether you **typed/pasted it in the
+  navigates **to** a gated host — whether you **typed/pasted it in the
   address bar**, used a bookmark, clicked a link, or were redirected there — the
   tab is guarded. From then on **every onward hop to a different host is gated**,
-  including each redirect the sandboxed page fires (HTTP 3xx, `<meta refresh>`,
+  including each redirect the gated page fires (HTTP 3xx, `<meta refresh>`,
   or JS `location =`) and any link that leaves it, even when the first
-  destination is itself trusted. (Sandboxed hosts are excluded from the per-tab
-  rule, so the sandboxed page itself — and navigation within it — loads normally;
+  destination is itself trusted. (Gated hosts are excluded from the per-tab
+  rule, so the gated page itself — and navigation within it — loads normally;
   only departures are gated.) A tab stays guarded for its lifetime once it has
-  touched a sandboxed host.
+  touched a gated host.
 
-  This is what catches a sandboxed redirector (e.g. `urldefense.com`) opened
-  straight from the address bar. Such a redirect carries **no sandbox referrer**,
+  This is what catches a gated redirector (e.g. `urldefense.com`) opened
+  straight from the address bar. Such a redirect carries **no gate referrer**,
   so the initiator-based rule can't see it. Two layers cover it:
   1. **Fast path** — on `onBeforeNavigate` (before the page loads) the per-tab
      block rule is installed, which catches the redirect *before it loads* when
@@ -112,7 +112,7 @@ Instead it lets the browser navigate for real and gates every hop:
      race.
   2. **Fallback** — `webNavigation` is observational, not blocking, so an
      immediate **server-side 3xx** can complete before that rule lands. So on
-     `onCommitted` the worker checks: *did this tab set out for a sandboxed host
+     `onCommitted` the worker checks: *did this tab set out for a gated host
      but actually commit on a different, non-trusted host?* If so the redirector
      bounced us, and the tab is redirected to the confirmation page for that
      landing (before you've interacted with it).
@@ -126,7 +126,7 @@ manifest.json          MV3 manifest. Permissions: storage, tabs, activeTab,
                        DNR rule redirects to it). Content script on <all_urls>,
                        gated at runtime.
 background.js          Service worker. (1) Toolbar badge in sync with the active
-                       tab's sandbox status. (2) Guarded navigation: opens the
+                       tab's gate status. (2) Guarded navigation: opens the
                        confirmed link in a new window, installs DNR session rules
                        that allow trusted/authorized domains and redirect every
                        other main-frame hop to the confirmation page, and
@@ -137,7 +137,7 @@ lib/domain.js          Shared helpers: hostOf() (normalized hostname),
                        confirm page (script tag), content script (manifest),
                        worker (importScripts).
 content/
-  content.js           Activates only when the page domain is in the sandbox list.
+  content.js           Activates only when the page domain is in the gate list.
                        Capture-phase click/auxclick interception + the modal with
                        the 5-second "Open" countdown and a confirm-to-trust button;
                        hands the URL verbatim to the worker.
@@ -152,7 +152,7 @@ confirm/
                        destination host appears to be a homograph/typo-squat trap.
 popup/
   popup.html/.css/.js  Toolbar UI: current domain, add/remove + trust/untrust
-                       toggles, a validated "add a domain" input to sandbox any
+                       toggles, a validated "add a domain" input to gate any
                        host manually (not just the current tab), and both lists
                        with per-item removal.
 scripts/
@@ -165,7 +165,8 @@ icons/
                        the .svg and .sh are dev-only and excluded from the build).
 ```
 
-**State:** two `chrome.storage.local` keys — `sandboxDomains` (protected sites)
+**State:** two `chrome.storage.local` keys — `sandboxDomains` (gated sites; the
+key name is **legacy** and kept as-is so existing installs don't lose their list)
 and `trustedDomains` (destination allowlist) — each an array of **host** strings
 (despite the key names), observed live via `storage.onChanged`. Guard state
 (which windows are guarded, which hosts were allowed "just once" this session)
@@ -191,8 +192,8 @@ work.
 
 Outputs:
 
-- `dist/sandbox-link-guard/` — unpacked, ready for **Load unpacked**.
-- `dist/sandbox-link-guard-<version>.zip` — ready for the Chrome Web Store or
+- `dist/antiphishing-gate/` — unpacked, ready for **Load unpacked**.
+- `dist/antiphishing-gate-<version>.zip` — ready for the Chrome Web Store or
   for sharing.
 
 The version is read from `manifest.json`. `dist/` is git-ignored.
@@ -208,7 +209,7 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 
 ### Smoke test
 
-1. Visit e.g. `https://en.wikipedia.org`, open the popup, **Add to sandbox**.
+1. Visit e.g. `https://en.wikipedia.org`, open the popup, **Gate this site**.
    Badge should read **ON**.
 2. On that page, `Ctrl`/`Cmd`-click (or open in a new tab) a link to a different
    domain → the modal appears; **Open external site** is disabled with a
@@ -225,15 +226,15 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
      domain and confirm **Yes** to whitelist it up front.
 5. Click a link to a **different host** (even a sibling subdomain) in a new tab
    → modal appears; a link to the **same host** → no modal.
-6. **Remove from sandbox** in the popup → badge clears, links open normally.
+6. **Stop gating** in the popup → badge clears, links open normally.
 7. **Manual add:** in the popup, type a host (e.g. `example.com`, or paste a full
    URL) into the **Add a domain** box and press **Add**. It is normalized to a
    host and validated — an invalid entry (no dot, bad characters) or a duplicate
    shows an inline error and is not added.
-8. Same-tab gating: on a sandboxed page, click an in-tab link that lands on a
+8. Same-tab gating: on a gated page, click an in-tab link that lands on a
    **trusted** site which then redirects (JS/`<meta refresh>`) to an untrusted
    host → the confirmation page appears for that later hop.
-9. Address-bar redirector gating: sandbox a redirector host (e.g.
+9. Address-bar redirector gating: gate a redirector host (e.g.
    `urldefense.com`), then **paste a wrapped link to it in the address bar** and
    press Enter → the page loads but its onward redirect is gated with the
    confirmation page (it does **not** silently follow the redirect).
@@ -243,7 +244,7 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 - **Popup / background:** `chrome://extensions` → the extension → **service
   worker** (background) and **Inspect** on the popup.
 - **Content script:** the page's own DevTools console (it runs in the page's
-  isolated world). Look for the `slg-overlay` element and `SandboxDomain` global.
+  isolated world). Look for the `slg-overlay` element and `GateDomain` global.
 - **State:** in any of those consoles,
   `chrome.storage.local.get(['sandboxDomains','trustedDomains'], console.log)`.
 - **Guard rules:** in the service-worker console,
@@ -255,7 +256,7 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 ## Known limitations
 
 - **Host-level matching is exact.** `app.example.com` and `example.com` are
-  treated as different sites; sandboxing/trusting one does not cover the other.
+  treated as different sites; gating/trusting one does not cover the other.
   (When the worker installs an allow rule for a host, `declarativeNetRequest`
   also allows that host's *subdomains* — i.e. allowing `example.com` covers
   `x.example.com`, but never a sibling like `evil.com`.)

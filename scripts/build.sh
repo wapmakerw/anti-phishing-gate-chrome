@@ -11,8 +11,8 @@
 # or `bash scripts/build.sh`.
 #
 # Usage:  ./scripts/build.sh
-# Output: dist/sandbox-link-guard/            (unpacked, ready for Load unpacked)
-#         dist/sandbox-link-guard-<version>.zip
+# Output: dist/antiphishing-gate/            (unpacked, ready for Load unpacked)
+#         dist/antiphishing-gate-<version>.zip
 
 set -eu
 
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 DIST="$ROOT/dist"
-NAME="sandbox-link-guard"
+NAME="antiphishing-gate"
 STAGE="$DIST/$NAME"
 
 # Files/dirs that make up the shipping extension.
