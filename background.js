@@ -33,6 +33,9 @@ var guardedTabs = new Set();      // tab ids whose navigation we gate
 var sessionAllowed = {};          // tabId -> Set of domains authorized this session
 var tabOriginHost = {};           // tabId -> last committed main-frame host
 var pendingGateNav = {};       // tabId -> gate host a pending navigation aims at
+var gateSpawnedTabs = new Set();  // new tabs opened from a gated/guarded page,
+                                  // whose first landing must be gated even if
+                                  // the per-tab DNR rule lost the open race
 var gateList = [];             // cached copy of GATE_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
@@ -238,6 +241,7 @@ function unguard(tabId) {
 chrome.tabs.onRemoved.addListener(function (tabId) {
   delete tabOriginHost[tabId];
   delete pendingGateNav[tabId];
+  gateSpawnedTabs.delete(tabId);
   unguard(tabId);
 });
 
@@ -281,10 +285,16 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
   }
 });
 
+// A link/script in a gated (or already-guarded) tab opened a NEW tab/window.
+// We guard the new tab, but installing its per-tab DNR rule is async and can
+// lose the race against the new tab's very first request — so the rule may not
+// be in place in time to block it. Tagging the tab in gateSpawnedTabs lets the
+// onCommitted fallback gate that first landing if the rule was too slow.
 chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
   if (details.sourceTabId == null || details.sourceTabId === -1) return;
   var isSourceGuarded = guardedTabs.has(details.sourceTabId);
   if (isSourceGuarded) {
+    gateSpawnedTabs.add(details.tabId);
     guardedTabs.add(details.tabId);
     rebuildRules();
     return;
@@ -293,6 +303,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
     if (chrome.runtime.lastError || !tab || !tab.url) return;
     var host = hostOf(tab.url);
     if (host && gateList.indexOf(host) !== -1) {
+      gateSpawnedTabs.add(details.tabId);
       guardedTabs.add(details.tabId);
       rebuildRules();
     }
@@ -352,16 +363,22 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
   var newHost = hostOf(details.url);
   var pendingGate = pendingGateNav[tabId];
   delete pendingGateNav[tabId];
+  // Consume the "spawned from a gated page" tag — only the first commit of a
+  // freshly opened tab needs this fallback; after that the per-tab rule is in
+  // place and handles every onward hop.
+  var spawnedFromGate = gateSpawnedTabs.delete(tabId);
 
-  // Reliable fallback for the server-side-redirect race: we set out for a
-  // gated host but COMMITTED on a different, non-trusted host — the
-  // gated redirector bounced us before the per-tab rule could block it.
-  // Gate that landing now (the page hasn't been interacted with yet).
+  // Reliable fallback for two races where the per-tab DNR rule can land too
+  // late to block the first request, leaving a non-trusted host COMMITTED:
+  //   1. Server-side-redirect race: we set out for a gated host but the gated
+  //      redirector bounced us onward before the rule installed.
+  //   2. New-tab race: a link/window.open in a gated page opened this tab; its
+  //      first request can fire before onCreatedNavigationTarget's rule lands.
+  // In both cases gate the landing now (the page hasn't been interacted with).
   if (
-    pendingGate &&
     newHost &&
-    newHost !== pendingGate &&
-    !isAllowedDestination(newHost, tabId)
+    !isAllowedDestination(newHost, tabId) &&
+    ((pendingGate && newHost !== pendingGate) || spawnedFromGate)
   ) {
     guardTab(tabId);
     tabOriginHost[tabId] = newHost;

@@ -77,6 +77,9 @@ const onCommittedCallback = committedCalls[committedCalls.length - 1][0];
 const beforeNavCalls = mockChrome.webNavigation.onBeforeNavigate.addListener.mock.calls;
 const onBeforeNavigateCallback = beforeNavCalls[beforeNavCalls.length - 1][0];
 
+const createdTargetCalls = mockChrome.webNavigation.onCreatedNavigationTarget.addListener.mock.calls;
+const onCreatedNavigationTargetCallback = createdTargetCalls[createdTargetCalls.length - 1][0];
+
 describe("Background Service Worker Redirect Flow", () => {
   let ruleUpdates = [];
 
@@ -365,6 +368,76 @@ describe("Background Service Worker Redirect Flow", () => {
     expect(guardedTabs.has(tabId)).toBe(true);
     // The pending intent is consumed exactly once.
     expect(pendingGateNav[tabId]).toBeUndefined();
+  });
+
+  test("New tab opened from a gated page is gated even if the per-tab rule loses the open race", async () => {
+    // gmail.com is gated. A target=_blank link opens www.amazon.fr in a NEW
+    // tab. The new tab was never previously guarded, so its first request can
+    // fire before onCreatedNavigationTarget's per-tab DNR rule lands. The
+    // onCommitted fallback must still gate the landing.
+    gateList = ["gmail.com"];
+    const sourceTabId = 500;
+    const newTabId = 501;
+
+    // The source gmail tab is already guarded (it committed on the gated host).
+    guardedTabs.add(sourceTabId);
+
+    // The link opens a new tab targeting amazon.fr.
+    onCreatedNavigationTargetCallback({
+      sourceTabId: sourceTabId,
+      tabId: newTabId,
+      url: "https://www.amazon.fr/"
+    });
+    expect(gateSpawnedTabs.has(newTabId)).toBe(true);
+
+    // The new tab commits on amazon.fr before the rule could block it.
+    mockChrome.tabs.update.mockClear();
+    onCommittedCallback({
+      frameId: 0,
+      tabId: newTabId,
+      url: "https://www.amazon.fr/",
+      transitionType: "link",
+      transitionQualifiers: []
+    });
+
+    // The fallback redirects the new tab to the confirmation page.
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      newTabId,
+      expect.objectContaining({
+        url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fwww.amazon.fr%2F")
+      })
+    );
+    expect(guardedTabs.has(newTabId)).toBe(true);
+    // The tag is consumed after the first commit.
+    expect(gateSpawnedTabs.has(newTabId)).toBe(false);
+  });
+
+  test("New tab opened from a gated page landing on a TRUSTED host does not prompt", async () => {
+    gateList = ["gmail.com"];
+    trustedList = ["partner.com"];
+    const sourceTabId = 502;
+    const newTabId = 503;
+
+    guardedTabs.add(sourceTabId);
+    onCreatedNavigationTargetCallback({
+      sourceTabId: sourceTabId,
+      tabId: newTabId,
+      url: "https://partner.com/welcome"
+    });
+
+    mockChrome.tabs.update.mockClear();
+    onCommittedCallback({
+      frameId: 0,
+      tabId: newTabId,
+      url: "https://partner.com/welcome",
+      transitionType: "link",
+      transitionQualifiers: []
+    });
+
+    // Trusted landing: no confirmation page, but the tab stays guarded so any
+    // onward hop to a non-trusted host is still gated.
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+    expect(guardedTabs.has(newTabId)).toBe(true);
   });
 
   test("Gated redirector landing on a TRUSTED host does not prompt", async () => {

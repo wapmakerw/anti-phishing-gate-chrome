@@ -137,6 +137,15 @@ Instead it lets the browser navigate for real and gates every hop:
      bounced us, and the tab is redirected to the confirmation page for that
      landing (before you've interacted with it).
 
+- **New tabs/windows opened from a gated page are gated too.** A link with
+  `target="_blank"` (or a `window.open`) on a gated page — e.g. an external link
+  in webmail — opens a **brand-new tab** that was never previously guarded, so
+  its per-tab rule can lose the race against its very first request. When such a
+  tab is created (`onCreatedNavigationTarget` from a gated/guarded source) it is
+  tagged, and the same `onCommitted` fallback gates its **first landing** on any
+  non-trusted host — so the destination is confirmed even if the rule arrived
+  too late to block the request outright.
+
 ## Architecture
 
 ```
@@ -302,11 +311,13 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 - **"Just once" allows last for the browser session.** Continuing past a host
   without the "always trust" checkbox authorizes it for the rest of the session
   (kept in worker memory); checking the box persists it to `trustedDomains`.
-- **JavaScript-driven popups** (`window.open(...)` called by page scripts) are
-  not intercepted at the click stage. Content scripts run in an isolated world,
-  so overriding the page's `window.open` would require a `world: "MAIN"`
-  injection. Anchor links opening new windows — the common phishing vector —
-  are covered.
+- **New tabs/windows opened from a gated page are gated** — both anchor links
+  (`target="_blank"`) and JavaScript `window.open(...)`. They surface as a
+  `webNavigation` navigation target from the gated/guarded source tab, so the
+  new tab is guarded and its first landing on a non-trusted host is confirmed
+  via the `onCommitted` fallback even if the per-tab rule lost the open race. A
+  `window.open` that performs **no navigation** (e.g. a blank popup later filled
+  by script) has nothing to gate until it makes a main-frame request.
 - The icons are generated with ImageMagick (`./icons/make-icons.sh`). Edit
   `icons/icon.svg` (or the draw commands in the script) and re-run it to
   regenerate the PNGs; the manifest references the rasterized sizes.
