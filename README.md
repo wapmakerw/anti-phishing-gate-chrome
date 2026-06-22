@@ -1,5 +1,11 @@
 # Anti-Phishing Gate
 
+[<img src="icons/icon-48.png" align="left" width="48" height="48" alt="Anti-Phishing Gate icon">](https://chromewebstore.google.com/detail/anti-phishing-gate/pncbiadljanopmmhmeibhpnlembgbpkm)
+
+**[Install from the Chrome Web Store →](https://chromewebstore.google.com/detail/anti-phishing-gate/pncbiadljanopmmhmeibhpnlembgbpkm)**
+
+<br clear="left">
+
 A Chrome extension (Manifest V3) that helps you **avoid phishing redirects**.
 (Packaged as `sandbox-link-guard` by the build script.)
 
