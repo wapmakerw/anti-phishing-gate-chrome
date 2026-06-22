@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Anti-Phishing Gate",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Added layer of manual screening to help you avoid phishing links.",
   "permissions": [
     "storage",
