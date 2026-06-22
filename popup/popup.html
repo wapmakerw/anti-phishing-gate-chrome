@@ -28,6 +28,19 @@
         <span id="count" class="count">0</span>
       </div>
       <p class="section-hint">Protection is active while you browse these.</p>
+      <form id="manualAdd" class="manual-add">
+        <input
+          id="manualDomain"
+          class="manual-input"
+          type="text"
+          placeholder="Add a domain, e.g. example.com"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <button id="manualAddBtn" class="manual-add-btn" type="submit">Add</button>
+      </form>
+      <p id="manualError" class="manual-error" hidden></p>
       <ul id="domainList" class="domain-list"></ul>
       <p id="emptyHint" class="empty-hint">
         No sandboxed domains yet. Visit a site you want to protect and add it.

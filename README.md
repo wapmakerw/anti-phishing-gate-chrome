@@ -92,6 +92,20 @@ Instead it lets the browser navigate for real and gates every hop:
   prompts for **each** untrusted domain it passes through — including the
   redirector domain itself — as the navigation happens. No request is ever made
   until you've confirmed that hop.
+- **Same-tab navigation is guarded too — however you arrive.** The moment a tab
+  navigates **to** a sandboxed host — whether you **typed/pasted it in the
+  address bar**, used a bookmark, clicked a link, or were redirected there — the
+  tab is guarded *before the page loads*. From then on **every onward hop to a
+  different host is gated**, including each redirect the sandboxed page fires
+  (HTTP 3xx, `<meta refresh>`, or JS `location =`) and any link that leaves it,
+  even when the first destination is itself trusted. This is what catches a
+  sandboxed redirector (e.g. `urldefense.com`) opened straight from the address
+  bar: its onward redirect carries no sandbox referrer, so the initiator-based
+  rule can't see it, but the per-tab rule installed on arrival gates it anyway.
+  (Sandboxed hosts are excluded from that per-tab rule, so the sandboxed page
+  itself — and navigation within it — loads normally; only departures are
+  gated.) A tab stays guarded for its lifetime once it has touched a sandboxed
+  host.
 
 ## Architecture
 
@@ -128,7 +142,9 @@ confirm/
                        destination host appears to be a homograph/typo-squat trap.
 popup/
   popup.html/.css/.js  Toolbar UI: current domain, add/remove + trust/untrust
-                       toggles, and both lists with per-item removal.
+                       toggles, a validated "add a domain" input to sandbox any
+                       host manually (not just the current tab), and both lists
+                       with per-item removal.
 scripts/
   build.sh             Validates sources and packages dist/ (unpacked + zip).
 icons/
@@ -200,6 +216,17 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 5. Click a link to a **different host** (even a sibling subdomain) in a new tab
    → modal appears; a link to the **same host** → no modal.
 6. **Remove from sandbox** in the popup → badge clears, links open normally.
+7. **Manual add:** in the popup, type a host (e.g. `example.com`, or paste a full
+   URL) into the **Add a domain** box and press **Add**. It is normalized to a
+   host and validated — an invalid entry (no dot, bad characters) or a duplicate
+   shows an inline error and is not added.
+8. Same-tab gating: on a sandboxed page, click an in-tab link that lands on a
+   **trusted** site which then redirects (JS/`<meta refresh>`) to an untrusted
+   host → the confirmation page appears for that later hop.
+9. Address-bar redirector gating: sandbox a redirector host (e.g.
+   `urldefense.com`), then **paste a wrapped link to it in the address bar** and
+   press Enter → the page loads but its onward redirect is gated with the
+   confirmation page (it does **not** silently follow the redirect).
 
 ### Debugging
 

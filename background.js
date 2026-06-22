@@ -30,6 +30,7 @@ var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
 // In-memory guard state (session scoped).
 var guardedTabs = new Set();      // tab ids whose navigation we gate
 var sessionAllowed = {};          // tabId -> Set of domains authorized this session
+var tabOriginHost = {};           // tabId -> last committed main-frame host
 var sandboxList = [];             // cached copy of SANDBOX_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
@@ -137,7 +138,10 @@ async function rebuildRules() {
   for (var i = 0; i < tabIds.length; i++) {
     var tabId = tabIds[i];
     var allowed = sessionAllowed[tabId] ? Array.from(sessionAllowed[tabId]) : [];
-    var excludedDomains = uniq(trustedList.concat(allowed));
+    // Sandboxed hosts are excluded too: a guarded tab sitting ON a sandboxed
+    // page must be able to load it (and navigate within it) — only the onward
+    // hops to other hosts get gated.
+    var excludedDomains = uniq(trustedList.concat(sandboxList).concat(allowed));
     
     var ruleId = 1000 + tabId;
     addRules.push({
@@ -187,7 +191,10 @@ function unguard(tabId) {
   if (guardedTabs.delete(tabId)) rebuildRules();
 }
 
-chrome.tabs.onRemoved.addListener(function (tabId) { unguard(tabId); });
+chrome.tabs.onRemoved.addListener(function (tabId) {
+  delete tabOriginHost[tabId];
+  unguard(tabId);
+});
 
 // ----------------------------------------------------------------------------
 // Blocked Navigation Interception
@@ -241,6 +248,69 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
       rebuildRules();
     }
   });
+});
+
+// A transition that represents the user (or the page) following a link in the
+// same tab, rather than typing/bookmarking a fresh address.
+function isDirectLinkTransition(transitionType, qualifiers) {
+  if (transitionType === "link" || transitionType === "form_submit") return true;
+  var q = qualifiers || [];
+  return q.indexOf("client_redirect") !== -1 || q.indexOf("server_redirect") !== -1;
+}
+
+// Start guarding a tab (idempotent). Resets the per-tab session-allow list so a
+// fresh sandbox session doesn't inherit "just once" allows from a previous one.
+function guardTab(tabId) {
+  if (guardedTabs.has(tabId)) return;
+  sessionAllowed[tabId] = new Set();
+  guardedTabs.add(tabId);
+  rebuildRules();
+}
+
+// Landing ON a sandboxed domain — by ANY means: typed in the address bar, a
+// bookmark, a link, or a redirect — guards the tab BEFORE the page loads. This
+// is what catches a sandboxed redirector (e.g. urldefense.com) reached from the
+// address bar: its onward 3xx/JS redirect is initiated with no sandbox referrer,
+// so the initiator rule can't see it, but the per-tab rule (installed here,
+// before the page loads) gates every hop that leaves the sandboxed host.
+chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
+  if (details.frameId !== 0) return;
+  var targetHost = hostOf(details.url);
+  if (targetHost && sandboxList.indexOf(targetHost) !== -1) {
+    guardTab(details.tabId);
+  }
+});
+
+// Same-tab direct-link gating: when a direct link/redirect LEAVES a sandboxed
+// domain in the same tab, guard the tab so every redirect hop that follows is
+// gated — even when this first destination is itself trusted. (The initiator
+// DNR rule already gates hops while the initiator is the sandbox page; this
+// covers client-side redirects fired after the link's destination has loaded,
+// whose initiator is no longer the sandbox domain.)
+chrome.webNavigation.onCommitted.addListener(function (details) {
+  if (details.frameId !== 0) return;
+  var tabId = details.tabId;
+  var prevHost = tabOriginHost[tabId];
+  var newHost = hostOf(details.url);
+
+  // Backstop for onBeforeNavigate (the worker may have been dormant): committed
+  // ON a sandboxed host -> guard.
+  var landedOnSandbox = newHost && sandboxList.indexOf(newHost) !== -1;
+
+  // Followed a direct link/redirect that LEFT a sandboxed host -> guard, so the
+  // chain stays gated even when this first destination is trusted.
+  var leftSandboxViaLink =
+    prevHost &&
+    sandboxList.indexOf(prevHost) !== -1 &&
+    newHost && newHost !== prevHost &&
+    isDirectLinkTransition(details.transitionType, details.transitionQualifiers);
+
+  if (landedOnSandbox || leftSandboxViaLink) {
+    guardTab(tabId);
+  }
+
+  // Remember the committed host so the next navigation knows where it came from.
+  tabOriginHost[tabId] = newHost || prevHost;
 });
 
 // ----------------------------------------------------------------------------

@@ -17,7 +17,10 @@
     emptyHint: document.getElementById("emptyHint"),
     trustedList: document.getElementById("trustedList"),
     trustedCount: document.getElementById("trustedCount"),
-    trustedEmptyHint: document.getElementById("trustedEmptyHint")
+    trustedEmptyHint: document.getElementById("trustedEmptyHint"),
+    manualForm: document.getElementById("manualAdd"),
+    manualInput: document.getElementById("manualDomain"),
+    manualError: document.getElementById("manualError")
   };
 
   var currentDomain = null;
@@ -104,6 +107,61 @@
 
   els.toggleBtn.addEventListener("click", function () {
     toggle(SANDBOX_KEY, render);
+  });
+
+  // Normalize free-form input to a host and validate its shape. Returns either
+  // { host } or { error } with a human-readable message.
+  function normalizeAndValidate(input) {
+    var raw = String(input || "").trim();
+    if (!raw) return { error: "Enter a domain to add." };
+
+    var host = domainLib.hostOf(raw);
+    if (!host) return { error: "That doesn't look like a valid domain." };
+    if (host.indexOf(".") === -1) return { error: "Enter a full domain, e.g. example.com." };
+    if (
+      !/^[a-z0-9.-]+$/.test(host) ||
+      host.indexOf("..") !== -1 ||
+      host.charAt(0) === "." || host.charAt(host.length - 1) === "." ||
+      host.charAt(0) === "-" || host.charAt(host.length - 1) === "-"
+    ) {
+      return { error: "That doesn't look like a valid domain." };
+    }
+    return { host: host };
+  }
+
+  function showManualError(message) {
+    if (!message) {
+      els.manualError.hidden = true;
+      els.manualError.textContent = "";
+      return;
+    }
+    els.manualError.textContent = message;
+    els.manualError.hidden = false;
+  }
+
+  els.manualForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var result = normalizeAndValidate(els.manualInput.value);
+    if (result.error) {
+      showManualError(result.error);
+      return;
+    }
+    chrome.storage.local.get(SANDBOX_KEY, function (data) {
+      var list = (data && data[SANDBOX_KEY]) || [];
+      if (list.indexOf(result.host) !== -1) {
+        showManualError('"' + result.host + '" is already sandboxed.');
+        return;
+      }
+      setKey(SANDBOX_KEY, list.concat([result.host]), function () {
+        els.manualInput.value = "";
+        showManualError("");
+        render();
+      });
+    });
+  });
+
+  els.manualInput.addEventListener("input", function () {
+    if (!els.manualError.hidden) showManualError("");
   });
 
   // Resolve the active tab's domain, then render.

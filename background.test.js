@@ -44,7 +44,9 @@ const mockChrome = {
   },
   webNavigation: {
     onErrorOccurred: { addListener: jest.fn() },
-    onCreatedNavigationTarget: { addListener: jest.fn() }
+    onCreatedNavigationTarget: { addListener: jest.fn() },
+    onCommitted: { addListener: jest.fn() },
+    onBeforeNavigate: { addListener: jest.fn() }
   }
 };
 
@@ -69,6 +71,12 @@ const onErrorOccurredCallback = calls[calls.length - 1][0];
 const storageCalls = mockChrome.storage.onChanged.addListener.mock.calls;
 const storageCallback = storageCalls[storageCalls.length - 1][0];
 
+const committedCalls = mockChrome.webNavigation.onCommitted.addListener.mock.calls;
+const onCommittedCallback = committedCalls[committedCalls.length - 1][0];
+
+const beforeNavCalls = mockChrome.webNavigation.onBeforeNavigate.addListener.mock.calls;
+const onBeforeNavigateCallback = beforeNavCalls[beforeNavCalls.length - 1][0];
+
 describe("Background Service Worker Redirect Flow", () => {
   let ruleUpdates = [];
 
@@ -79,6 +87,7 @@ describe("Background Service Worker Redirect Flow", () => {
     sandboxList = [];
     trustedList = [];
     sessionAllowed = {};
+    tabOriginHost = {};
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -284,6 +293,101 @@ describe("Background Service Worker Redirect Flow", () => {
         url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fwww.adweek.com")
       })
     );
+  });
+
+  test("Address-bar navigation to a sandboxed redirector guards the tab and gates the redirect", async () => {
+    // urldefense.com is sandboxed; the user pastes a urldefense link in the
+    // address bar (typed transition, no sandbox initiator).
+    sandboxList = ["urldefense.com"];
+    const tabId = 300;
+
+    // onBeforeNavigate to the sandboxed host fires before it loads.
+    onBeforeNavigateCallback({
+      frameId: 0,
+      tabId: tabId,
+      url: "https://urldefense.com/v3/__https://evil.example/__;!!abc$"
+    });
+
+    // The tab is guarded before the page loads, and its per-tab rule excludes
+    // the sandboxed host (so urldefense.com itself loads) but not other hosts.
+    expect(guardedTabs.has(tabId)).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    let rule = ruleUpdates[ruleUpdates.length - 1].addRules.find(r => r.id === 1000 + tabId);
+    expect(rule).toBeDefined();
+    expect(rule.condition.excludedRequestDomains).toContain("urldefense.com");
+
+    // urldefense.com 302-redirects onward; the request to evil.example is on the
+    // sandboxed page, so DNR blocks it and we show the confirmation page.
+    mockTabUrls[tabId] = "https://urldefense.com/v3/__https://evil.example/__;!!abc$";
+    mockChrome.tabs.update.mockClear();
+    await onErrorOccurredCallback({
+      frameId: 0,
+      tabId: tabId,
+      url: "https://evil.example/landing",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      tabId,
+      expect.objectContaining({
+        url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fevil.example%2Flanding")
+      })
+    );
+  });
+
+  test("Committing on a sandboxed domain guards the tab (onCommitted backstop)", async () => {
+    sandboxList = ["bank.com"];
+    const tabId = 200;
+
+    // The tab lands on the sandboxed page (worker missed onBeforeNavigate).
+    onCommittedCallback({
+      frameId: 0,
+      tabId: tabId,
+      url: "https://bank.com/home",
+      transitionType: "typed",
+      transitionQualifiers: []
+    });
+
+    // Landing on the sandboxed host guards the tab, so any onward hop is gated.
+    expect(guardedTabs.has(tabId)).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
+    expect(lastRuleUpdate.addRules.some(r => r.id === 1000 + tabId)).toBe(true);
+  });
+
+  test("Direct link leaving a sandboxed page guards even if the landing was missed", async () => {
+    sandboxList = ["bank.com"];
+    const tabId = 201;
+
+    // Pretend the tab was already on the sandboxed page but never got guarded
+    // (e.g. it was already open when the domain was sandboxed).
+    tabOriginHost[tabId] = "bank.com";
+    expect(guardedTabs.has(tabId)).toBe(false);
+
+    // A direct link to another host in the same tab guards it.
+    onCommittedCallback({
+      frameId: 0, tabId, url: "https://partner.com/welcome",
+      transitionType: "link", transitionQualifiers: []
+    });
+    expect(guardedTabs.has(tabId)).toBe(true);
+  });
+
+  test("Navigations that never touch a sandboxed host do not guard the tab", async () => {
+    sandboxList = ["bank.com"];
+    const tabId = 202;
+
+    onCommittedCallback({
+      frameId: 0, tabId, url: "https://example.com/",
+      transitionType: "typed", transitionQualifiers: []
+    });
+    onCommittedCallback({
+      frameId: 0, tabId, url: "https://example.com/page",
+      transitionType: "link", transitionQualifiers: []
+    });
+    onCommittedCallback({
+      frameId: 0, tabId, url: "https://other.com/",
+      transitionType: "link", transitionQualifiers: []
+    });
+    expect(guardedTabs.has(tabId)).toBe(false);
   });
 
   test("Tab isolation and navigation reset scenario", async () => {

@@ -171,6 +171,46 @@ body {
   font-size: 11px;
 }
 
+.manual-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.manual-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.manual-input:focus {
+  outline: none;
+  border-color: var(--green);
+}
+
+.manual-add-btn {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--green);
+  color: #fff;
+}
+
+.manual-error {
+  margin: -2px 0 8px;
+  font-size: 11px;
+  color: var(--red);
+  line-height: 1.4;
+}
+
 .domain-list {
   list-style: none;
   margin: 0;
