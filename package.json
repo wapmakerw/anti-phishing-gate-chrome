@@ -1,6 +1,6 @@
 {
   "name": "antiphishing-gate",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Added layer of manual screening to help you avoid phishing links.",
   "scripts": {
     "test": "jest"
