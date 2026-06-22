@@ -88,6 +88,7 @@ describe("Background Service Worker Redirect Flow", () => {
     trustedList = [];
     sessionAllowed = {};
     tabOriginHost = {};
+    pendingSandboxNav = {};
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -332,6 +333,60 @@ describe("Background Service Worker Redirect Flow", () => {
         url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fevil.example%2Flanding")
       })
     );
+  });
+
+  test("Server-side redirect race: gates the landing when the sandboxed redirector bounces us before the rule lands", async () => {
+    // urldefense.com is sandboxed; the per-tab DNR rule loses the race against
+    // its immediate 302, so the tab COMMITS on evil.example. The onCommitted
+    // fallback must catch the mismatch and redirect to the confirmation page.
+    sandboxList = ["urldefense.com"];
+    const tabId = 310;
+
+    onBeforeNavigateCallback({
+      frameId: 0, tabId,
+      url: "https://urldefense.com/v3/__https://evil.example/__;!!abc$"
+    });
+    expect(pendingSandboxNav[tabId]).toBe("urldefense.com");
+
+    mockChrome.tabs.update.mockClear();
+    onCommittedCallback({
+      frameId: 0, tabId,
+      url: "https://evil.example/landing",
+      transitionType: "link",
+      transitionQualifiers: ["server_redirect"]
+    });
+
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      tabId,
+      expect.objectContaining({
+        url: expect.stringContaining("confirm/confirm.html?d=https%3A%2F%2Fevil.example%2Flanding")
+      })
+    );
+    expect(guardedTabs.has(tabId)).toBe(true);
+    // The pending intent is consumed exactly once.
+    expect(pendingSandboxNav[tabId]).toBeUndefined();
+  });
+
+  test("Sandboxed redirector landing on a TRUSTED host does not prompt", async () => {
+    sandboxList = ["urldefense.com"];
+    trustedList = ["partner.com"];
+    const tabId = 311;
+
+    onBeforeNavigateCallback({
+      frameId: 0, tabId,
+      url: "https://urldefense.com/v3/__https://partner.com/__;!!abc$"
+    });
+
+    mockChrome.tabs.update.mockClear();
+    onCommittedCallback({
+      frameId: 0, tabId,
+      url: "https://partner.com/welcome",
+      transitionType: "link",
+      transitionQualifiers: ["server_redirect"]
+    });
+
+    // Trusted landing: no confirmation page.
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
   });
 
   test("Committing on a sandboxed domain guards the tab (onCommitted backstop)", async () => {

@@ -95,17 +95,27 @@ Instead it lets the browser navigate for real and gates every hop:
 - **Same-tab navigation is guarded too — however you arrive.** The moment a tab
   navigates **to** a sandboxed host — whether you **typed/pasted it in the
   address bar**, used a bookmark, clicked a link, or were redirected there — the
-  tab is guarded *before the page loads*. From then on **every onward hop to a
-  different host is gated**, including each redirect the sandboxed page fires
-  (HTTP 3xx, `<meta refresh>`, or JS `location =`) and any link that leaves it,
-  even when the first destination is itself trusted. This is what catches a
-  sandboxed redirector (e.g. `urldefense.com`) opened straight from the address
-  bar: its onward redirect carries no sandbox referrer, so the initiator-based
-  rule can't see it, but the per-tab rule installed on arrival gates it anyway.
-  (Sandboxed hosts are excluded from that per-tab rule, so the sandboxed page
-  itself — and navigation within it — loads normally; only departures are
-  gated.) A tab stays guarded for its lifetime once it has touched a sandboxed
-  host.
+  tab is guarded. From then on **every onward hop to a different host is gated**,
+  including each redirect the sandboxed page fires (HTTP 3xx, `<meta refresh>`,
+  or JS `location =`) and any link that leaves it, even when the first
+  destination is itself trusted. (Sandboxed hosts are excluded from the per-tab
+  rule, so the sandboxed page itself — and navigation within it — loads normally;
+  only departures are gated.) A tab stays guarded for its lifetime once it has
+  touched a sandboxed host.
+
+  This is what catches a sandboxed redirector (e.g. `urldefense.com`) opened
+  straight from the address bar. Such a redirect carries **no sandbox referrer**,
+  so the initiator-based rule can't see it. Two layers cover it:
+  1. **Fast path** — on `onBeforeNavigate` (before the page loads) the per-tab
+     block rule is installed, which catches the redirect *before it loads* when
+     it's a client-side redirect or a server redirect slow enough to lose the
+     race.
+  2. **Fallback** — `webNavigation` is observational, not blocking, so an
+     immediate **server-side 3xx** can complete before that rule lands. So on
+     `onCommitted` the worker checks: *did this tab set out for a sandboxed host
+     but actually commit on a different, non-trusted host?* If so the redirector
+     bounced us, and the tab is redirected to the confirmation page for that
+     landing (before you've interacted with it).
 
 ## Architecture
 

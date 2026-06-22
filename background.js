@@ -31,6 +31,7 @@ var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
 var guardedTabs = new Set();      // tab ids whose navigation we gate
 var sessionAllowed = {};          // tabId -> Set of domains authorized this session
 var tabOriginHost = {};           // tabId -> last committed main-frame host
+var pendingSandboxNav = {};       // tabId -> sandbox host a pending navigation aims at
 var sandboxList = [];             // cached copy of SANDBOX_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
@@ -43,6 +44,25 @@ function uniq(arr) {
     if (arr[i] && out.indexOf(arr[i]) === -1) out.push(arr[i]);
   }
   return out;
+}
+
+// True when `host` equals or is a subdomain of any entry in `list` — matching
+// the way declarativeNetRequest treats requestDomains (host + its subdomains).
+function hostMatches(host, list) {
+  if (!host) return false;
+  for (var i = 0; i < list.length; i++) {
+    var d = list[i];
+    if (d && (host === d || host.slice(-(d.length + 1)) === "." + d)) return true;
+  }
+  return false;
+}
+
+// A destination that should never be gated for this tab: a sandboxed host
+// itself, an always-trusted host, or one allowed "just once" this session.
+function isAllowedDestination(host, tabId) {
+  if (hostMatches(host, sandboxList) || hostMatches(host, trustedList)) return true;
+  var allowed = sessionAllowed[tabId];
+  return Boolean(allowed && allowed.has(host));
 }
 
 // ----------------------------------------------------------------------------
@@ -193,6 +213,7 @@ function unguard(tabId) {
 
 chrome.tabs.onRemoved.addListener(function (tabId) {
   delete tabOriginHost[tabId];
+  delete pendingSandboxNav[tabId];
   unguard(tabId);
 });
 
@@ -205,12 +226,16 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
   if (details.error === "net::ERR_BLOCKED_BY_CLIENT") {
     var blockedUrl = details.url;
     var host = hostOf(blockedUrl);
-    
+
+    // The fast-path rule won the race for this navigation; the onCommitted
+    // fallback must not also fire for it.
+    delete pendingSandboxNav[details.tabId];
+
     // If the blocked URL is our own sandbox domain, do not prompt the user for it.
     if (host && sandboxList.indexOf(host) !== -1) {
       return;
     }
-    
+
     var tabId = details.tabId;
     
     return new Promise(function (resolve) {
@@ -277,7 +302,16 @@ chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
   if (details.frameId !== 0) return;
   var targetHost = hostOf(details.url);
   if (targetHost && sandboxList.indexOf(targetHost) !== -1) {
+    // Fast path: install the per-tab gate before the page loads. This wins the
+    // race against a *client-side* redirect (which fires after the page commits)
+    // but can lose against an immediate *server-side* 3xx, so we also record the
+    // intent and verify where we actually land in onCommitted below.
+    pendingSandboxNav[details.tabId] = targetHost;
     guardTab(details.tabId);
+  } else {
+    // A fresh navigation that doesn't aim at a sandboxed host clears any stale
+    // intent so the redirect fallback can't mis-fire on the next commit.
+    delete pendingSandboxNav[details.tabId];
   }
 });
 
@@ -292,6 +326,24 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
   var tabId = details.tabId;
   var prevHost = tabOriginHost[tabId];
   var newHost = hostOf(details.url);
+  var pendingSandbox = pendingSandboxNav[tabId];
+  delete pendingSandboxNav[tabId];
+
+  // Reliable fallback for the server-side-redirect race: we set out for a
+  // sandboxed host but COMMITTED on a different, non-trusted host — the
+  // sandboxed redirector bounced us before the per-tab rule could block it.
+  // Gate that landing now (the page hasn't been interacted with yet).
+  if (
+    pendingSandbox &&
+    newHost &&
+    newHost !== pendingSandbox &&
+    !isAllowedDestination(newHost, tabId)
+  ) {
+    guardTab(tabId);
+    tabOriginHost[tabId] = newHost;
+    chrome.tabs.update(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(details.url) });
+    return;
+  }
 
   // Backstop for onBeforeNavigate (the worker may have been dormant): committed
   // ON a sandboxed host -> guard.
