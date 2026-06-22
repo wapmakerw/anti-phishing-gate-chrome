@@ -247,7 +247,7 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 
 ### Smoke test
 
-1. Visit e.g. `https://en.wikipedia.org`, open the popup, **Gate this site**.
+1. Visit e.g. `https://en.wikipedia.org`, open the popup, **Gate this domain**.
    Badge should read **ON**.
 2. On that page, `Ctrl`/`Cmd`-click (or open in a new tab) a link to a different
    domain → the modal appears; **Open external site** is disabled with a

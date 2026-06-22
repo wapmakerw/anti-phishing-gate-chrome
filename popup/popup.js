@@ -97,11 +97,11 @@
           els.status.textContent = "Trusted destination — never prompted.";
           els.status.className = "status on";
         } else {
-          els.status.textContent = "Not protected.";
+          els.status.textContent = "Outgoing links from this domain are not gated";
           els.status.className = "status off";
         }
 
-        els.toggleBtn.textContent = inGate ? "Stop gating" : "Gate this site";
+        els.toggleBtn.textContent = inGate ? "Stop gating" : "Gate this domain";
         els.toggleBtn.classList.toggle("remove", inGate);
       }
 
