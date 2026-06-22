@@ -20,6 +20,7 @@
 
   var els = {
     domain: document.getElementById("domain"),
+    lookalike: document.getElementById("lookalike"),
     full: document.getElementById("full"),
     always: document.getElementById("always"),
     cancel: document.getElementById("cancel"),
@@ -30,6 +31,25 @@
   els.full.textContent = target;
   els.full.title = target;
   document.title = "Confirm: " + (host || "navigation");
+
+  // Extra notice when the destination host looks like a look-alike trap
+  // (look-alike digits such as 0/1, or international/punycode characters).
+  renderLookalike(els.lookalike, lib.confusableRisk(host));
+
+  function renderLookalike(el, reasons) {
+    if (!el || !reasons) return;
+    var title = document.createElement("strong");
+    title.textContent = "⚠ This domain name may be a look-alike";
+    el.appendChild(title);
+    var ul = document.createElement("ul");
+    reasons.forEach(function (reason) {
+      var li = document.createElement("li");
+      li.textContent = reason;
+      ul.appendChild(li);
+    });
+    el.appendChild(ul);
+    el.hidden = false;
+  }
 
   // "Continue" enables only once we know the tab AND the 5s pause has elapsed.
   var tabId = null;

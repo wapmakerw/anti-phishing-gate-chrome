@@ -9,6 +9,7 @@
 
   var els = {
     currentDomain: document.getElementById("currentDomain"),
+    lookalike: document.getElementById("lookalike"),
     status: document.getElementById("status"),
     toggleBtn: document.getElementById("toggleBtn"),
     list: document.getElementById("domainList"),
@@ -112,6 +113,27 @@
       currentDomain = domainLib.hostOf(tab.url) || null;
     }
     els.currentDomain.textContent = currentDomain || "Unsupported page";
+    renderLookalike(els.lookalike, domainLib.confusableRisk(currentDomain));
     render();
   });
+
+  // Flag when the current domain itself looks like a look-alike trap.
+  function renderLookalike(el, reasons) {
+    el.textContent = "";
+    if (!reasons) {
+      el.hidden = true;
+      return;
+    }
+    var title = document.createElement("strong");
+    title.textContent = "⚠ Possible look-alike domain";
+    el.appendChild(title);
+    var ul = document.createElement("ul");
+    reasons.forEach(function (reason) {
+      var li = document.createElement("li");
+      li.textContent = reason;
+      ul.appendChild(li);
+    });
+    el.appendChild(ul);
+    el.hidden = false;
+  }
 })();

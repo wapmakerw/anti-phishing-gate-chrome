@@ -56,6 +56,21 @@ There are two lists:
 The toolbar badge shows **ON** (green) when the current tab's domain is
 sandboxed.
 
+### Look-alike (homograph) domain warning
+
+Wherever a host is shown to you — the **confirmation interstitial** for a
+destination, and the **toolbar popup** for the current site — the extension adds
+an extra **look-alike-domain notice** when the host name appears to be a trap:
+
+- a label that **mixes letters with look-alike digits** (`0`↔`o`, `1`↔`l`/`i`),
+  e.g. `g00gle.com`, `paypa1.com`, `amaz0n.co`; or
+- **international / punycode characters** (`xn--…`, Cyrillic/Greek glyphs) that
+  can imitate a familiar name.
+
+This is a heuristic second-look prompt (`confusableRisk()` in `lib/domain.js`),
+not an authoritative verdict — legitimate hosts can contain digits — so it
+*informs* rather than blocks.
+
 ### Redirectors and phishing
 
 Phishing mail often hides the real target behind a redirector so the visible
@@ -85,10 +100,11 @@ background.js          Service worker. (1) Toolbar badge in sync with the active
                        that allow trusted/authorized domains and redirect every
                        other main-frame hop to the confirmation page, and
                        unguards the window once it lands on a real page.
-lib/domain.js          Shared helpers: hostOf() (normalized hostname) and
-                       isExternalHost(). Loaded by the popup and confirm page
-                       (script tag), content script (manifest), worker
-                       (importScripts).
+lib/domain.js          Shared helpers: hostOf() (normalized hostname),
+                       isExternalHost(), and confusableRisk() (look-alike /
+                       homograph domain-trap detector). Loaded by the popup and
+                       confirm page (script tag), content script (manifest),
+                       worker (importScripts).
 content/
   content.js           Activates only when the page domain is in the sandbox list.
                        Capture-phase click/auxclick interception + the modal with
@@ -100,7 +116,9 @@ confirm/
   confirm.html/.css/.js  In-extension interstitial the DNR rule redirects to when
                        a guarded navigation hits a non-trusted domain. Continue
                        (whitelist + proceed) or Close window (cancel). The blocked
-                       URL arrives appended raw after "?d=".
+                       URL arrives appended raw after "?d=". Shows an extra
+                       look-alike-domain notice (via confusableRisk()) when the
+                       destination host appears to be a homograph/typo-squat trap.
 popup/
   popup.html/.css/.js  Toolbar UI: current domain, add/remove + trust/untrust
                        toggles, and both lists with per-item removal.

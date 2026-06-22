@@ -60,6 +60,27 @@ body {
   word-break: break-all;
 }
 
+.lookalike {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  padding: 7px 9px;
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #92400e;
+}
+.lookalike strong {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.lookalike ul {
+  margin: 0;
+  padding-left: 15px;
+}
+.lookalike li { word-break: break-all; }
+
 .status {
   font-size: 12px;
   margin-bottom: 10px;
