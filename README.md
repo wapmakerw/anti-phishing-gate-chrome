@@ -291,6 +291,25 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 - **Confirmation page:** it's a normal extension page — right-click → Inspect
   inside the guarded window when it's showing.
 
+- **DNR domain conditions never include IP literals.** `excludedRequestDomains`/
+  `initiatorDomains`/`requestDomains` only accept canonical domain names —
+  feeding them an IPv4/IPv6 literal (common for plain `http://` links to
+  routers, printers, or `localhost`-style hosts) makes
+  `updateSessionRules` reject the **entire** rule set, which used to leave a
+  stale/overly-broad block rule in place and show the confirm page in a loop
+  even for non-gated hosts. `lib/domain.js`'s `isDnrDomain()` filters such
+  hosts out of every `*Domains` array before it reaches DNR, and
+  `doRebuildRules()` omits `excludedRequestDomains` entirely when nothing is
+  left to exclude (DNR also rejects an empty array there). A host that can't
+  be expressed as a DNR exclusion but is already authorized (gated origin,
+  trusted, or "just once") is instead re-navigated once via `navRetry`
+  (`background.js`) rather than re-prompted.
+- **Non-DNR-expressible confirmations still complete.** Because those hosts
+  can't be excluded by a DNR rule, the confirm-page "continue" flow falls back
+  to a single automatic retry of the original navigation instead of relying on
+  the block rule to let it through; `navRetry` is per tab+host and resets on
+  the tab's next successful navigation.
+
 ## Known limitations
 
 - **Host-level matching is exact.** `app.example.com` and `example.com` are
