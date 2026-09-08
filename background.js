@@ -36,11 +36,21 @@ var pendingGateNav = {};       // tabId -> gate host a pending navigation aims a
 var gateSpawnedTabs = new Set();  // new tabs opened from a gated/guarded page,
                                   // whose first landing must be gated even if
                                   // the per-tab DNR rule lost the open race
+var navRetry = {};                // tabId -> Set of authorized hosts we already
+                                  // re-navigated once after a spurious block,
+                                  // so a host DNR can't exclude can't loop
 var gateList = [];             // cached copy of GATE_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
 
 function hostOf(url) {
   return domainLib.hostOf(url);
+}
+
+// Keep only entries DNR will accept as a domain condition. An IP literal or an
+// otherwise-malformed host makes updateSessionRules reject the entire rule set
+// (breaking gating session-wide), so it must never reach a *Domains array.
+function dnrDomains(list) {
+  return list.filter(domainLib.isDnrDomain);
 }
 
 // chrome.tabs.update rejects with "No tab with id: N" when the tab was closed
@@ -188,33 +198,38 @@ async function doRebuildRules() {
     // Gated hosts are excluded too: a guarded tab sitting ON a gated
     // page must be able to load it (and navigate within it) — only the onward
     // hops to other hosts get gated.
-    var excludedDomains = uniq(trustedList.concat(gateList).concat(allowed));
-    
+    var excludedDomains = dnrDomains(uniq(trustedList.concat(gateList).concat(allowed)));
+
     var ruleId = 1000 + tabId;
+    // DNR rejects an empty excludedRequestDomains array; when nothing is
+    // excludable, omit the key so the rule simply gates every main-frame hop.
+    var tabCondition = {
+      resourceTypes: ["main_frame"],
+      tabIds: [tabId]
+    };
+    if (excludedDomains.length) tabCondition.excludedRequestDomains = excludedDomains;
     addRules.push({
       id: ruleId,
       priority: 10,
       action: { type: "block" },
-      condition: {
-        resourceTypes: ["main_frame"],
-        tabIds: [tabId],
-        excludedRequestDomains: excludedDomains
-      }
+      condition: tabCondition
     });
   }
 
   // 2. Initiator-based gate block rule
-  if (gateList.length) {
-    var excludedDomainsForGate = uniq(trustedList.concat(gateList));
+  var initiatorGateDomains = dnrDomains(gateList);
+  if (initiatorGateDomains.length) {
+    var excludedDomainsForGate = dnrDomains(uniq(trustedList.concat(gateList)));
+    var gateCondition = {
+      resourceTypes: ["main_frame"],
+      initiatorDomains: initiatorGateDomains
+    };
+    if (excludedDomainsForGate.length) gateCondition.excludedRequestDomains = excludedDomainsForGate;
     addRules.push({
       id: BLOCK_GATE_RULE_ID,
       priority: 10,
       action: { type: "block" },
-      condition: {
-        resourceTypes: ["main_frame"],
-        initiatorDomains: gateList,
-        excludedRequestDomains: excludedDomainsForGate
-      }
+      condition: gateCondition
     });
   }
 
@@ -241,6 +256,7 @@ function unguard(tabId) {
 chrome.tabs.onRemoved.addListener(function (tabId) {
   delete tabOriginHost[tabId];
   delete pendingGateNav[tabId];
+  delete navRetry[tabId];
   gateSpawnedTabs.delete(tabId);
   unguard(tabId);
 });
@@ -254,28 +270,41 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
   if (details.error === "net::ERR_BLOCKED_BY_CLIENT") {
     var blockedUrl = details.url;
     var host = hostOf(blockedUrl);
+    var tabId = details.tabId;
 
     // The fast-path rule won the race for this navigation; the onCommitted
     // fallback must not also fire for it.
-    delete pendingGateNav[details.tabId];
+    delete pendingGateNav[tabId];
 
-    // If the blocked URL is our own gate domain, do not prompt the user for it.
-    if (host && gateList.indexOf(host) !== -1) {
-      return;
-    }
-
-    var tabId = details.tabId;
-    
     return new Promise(function (resolve) {
       chrome.tabs.get(tabId, function (tab) {
         if (!chrome.runtime.lastError && tab && tab.url) {
           var currentHost = hostOf(tab.url);
           if (currentHost && gateList.indexOf(currentHost) !== -1) {
-            // Reset session-allowed domains for this tab on fresh navigation from gate
+            // Fresh navigation FROM a gated origin: drop the "just once" allows
+            // so each new outbound navigation is confirmed again.
             sessionAllowed[tabId] = new Set();
           }
         }
-        
+
+        // After any reset above, is the blocked host STILL authorized for this
+        // tab (a gated origin, an always-trusted domain, or one allowed "just
+        // once")? Then this block is spurious — the allow rule had not yet
+        // propagated when the request fired, or the host cannot be expressed as
+        // a DNR exclusion at all (an http:// IP address or bare localhost).
+        // Showing the confirm page would loop forever, since the user has
+        // already authorized it. Re-issue the navigation ONCE to recover the
+        // race; if it is still blocked, stop — never re-prompt for it.
+        if (host && isAllowedDestination(host, tabId)) {
+          if (!navRetry[tabId]) navRetry[tabId] = new Set();
+          if (navRetry[tabId].has(host)) { resolve(); return; }
+          navRetry[tabId].add(host);
+          resolve(rebuildRules().then(function () {
+            return safeTabUpdate(tabId, { url: blockedUrl });
+          }));
+          return;
+        }
+
         guardedTabs.add(tabId);
         resolve(rebuildRules().then(function () {
           return safeTabUpdate(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
@@ -401,6 +430,11 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
   if (landedOnGate || leftGateViaLink) {
     guardTab(tabId);
   }
+
+  // A real page committed (we did not bounce it to the confirm page), so the
+  // one-shot block-retry budget for this tab can reset: a future genuine block
+  // should be free to prompt again.
+  if (newHost && navRetry[tabId]) delete navRetry[tabId];
 
   // Remember the committed host so the next navigation knows where it came from.
   tabOriginHost[tabId] = newHost || prevHost;

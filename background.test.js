@@ -92,6 +92,7 @@ describe("Background Service Worker Redirect Flow", () => {
     sessionAllowed = {};
     tabOriginHost = {};
     pendingGateNav = {};
+    navRetry = {};
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -180,10 +181,11 @@ describe("Background Service Worker Redirect Flow", () => {
 
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    // Verify it is no longer excluded
+    // Verify it is no longer excluded. (When nothing is left to exclude the key
+    // is omitted entirely — DNR rejects an empty excludedRequestDomains array.)
     lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
     blockRule = lastRuleUpdate.addRules.find(r => r.id === 1000 + 42);
-    expect(blockRule.condition.excludedRequestDomains).not.toContain("trusted-domain.com");
+    expect(blockRule.condition.excludedRequestDomains || []).not.toContain("trusted-domain.com");
   });
 
   test("HTTP Redirect scenario with Always Trust: next hops are still blocked", async () => {
