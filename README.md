@@ -50,8 +50,11 @@ There are two lists:
    *before it loads* and replaced with a confirmation page (whose **Continue**
    button also has a 5-second pause). **Continue** whitelists that host and
    proceeds; **Close window** cancels entirely.
-6. The window stays guarded for its whole lifetime (until you close it), so a
-   chain that passes through several hosts is confirmed at **each** one.
+6. The tab stays guarded while it is on a gated page, on the confirmation page,
+   or moving through a redirect chain, so a chain that passes through several
+   hosts is confirmed at **each** one. Once it **settles** on a non-gated page
+   for 10 s (`GUARD_SETTLE_MS`) with no further redirect, the guard expires and
+   later navigations in that tab (typed URLs, ordinary links) are not captured.
 
 The toolbar badge shows **ON** (green) when the current tab's domain is
 gated.
@@ -120,8 +123,10 @@ Instead it lets the browser navigate for real and gates every hop:
   or JS `location =`) and any link that leaves it, even when the first
   destination is itself trusted. (Gated hosts are excluded from the per-tab
   rule, so the gated page itself — and navigation within it — loads normally;
-  only departures are gated.) A tab stays guarded for its lifetime once it has
-  touched a gated host.
+  only departures are gated.) The guard holds while the tab is on a gated
+  host and through the redirect chain that follows; it expires once the tab has
+  sat on a non-gated page for `GUARD_SETTLE_MS` (10 s). Delayed client-side
+  redirects fired within that window are still gated.
 
   This is what catches a gated redirector (e.g. `urldefense.com`) opened
   straight from the address bar. Such a redirect carries **no gate referrer**,
@@ -159,7 +164,9 @@ background.js          Service worker. (1) Toolbar badge in sync with the active
                        confirmed link in a new window, installs DNR session rules
                        that allow trusted/authorized domains and redirect every
                        other main-frame hop to the confirmation page, and
-                       unguards the window once it lands on a real page.
+                       unguards the tab once it settles on a non-gated page.
+                       Only reacts to ERR_BLOCKED_BY_CLIENT its own rules can
+                       have caused. Guard state persisted in storage.session.
 lib/domain.js          Shared helpers: hostOf() (normalized hostname),
                        isExternalHost(), and confusableRisk() (look-alike /
                        homograph domain-trap detector). Loaded by the popup and
@@ -199,9 +206,29 @@ icons/
 key name is **legacy** and kept as-is so existing installs don't lose their list)
 and `trustedDomains` (destination allowlist) — each an array of **host** strings
 (despite the key names), observed live via `storage.onChanged`. Guard state
-(which windows are guarded, which hosts were allowed "just once" this session)
-lives in memory in the worker and drives the `declarativeNetRequest` session
-rules; "always trust" choices are persisted to `trustedDomains`.
+(guarded tabs, hosts allowed "just once", settle deadlines, retry budget,
+last committed host per tab) lives in worker memory **and is mirrored to
+`chrome.storage.session`** under `gateState` (`saveState`/`loadState`), so an
+MV3 worker restart — e.g. while you wait on the 5 s confirm page — doesn't
+forget approvals and re-prompt. Every event handler is wrapped in `whenReady`,
+which waits for the lists and this state to be restored first. It drives the
+`declarativeNetRequest` session rules; "always trust" choices are persisted to
+`trustedDomains`.
+
+**DNR rules** (all session rules, rebuilt together):
+
+| id | action | purpose |
+|---|---|---|
+| `3` | block (prio 10) | main-frame requests initiated by a gated host, except trusted/gated domains |
+| `4` | allow (prio 20) | `regexFilter` for trusted/gated hosts DNR can't take as a domain (IPs, IPv6) |
+| `1000 + tabId` | block (prio 10) | every main-frame hop in a guarded tab, except trusted/gated/allowed domains |
+| `1500000000 + n` | allow (prio 20) | per guarded tab: `regexFilter` for "just once" hosts DNR can't take as a domain |
+
+**Which blocks are ours:** `onErrorOccurred` only shows the confirm page for
+`ERR_BLOCKED_BY_CLIENT` when the tab is guarded, currently on a gated page, or
+was opened from one (`openerTabId`). Other extensions (ad/tracker blockers)
+produce the same error; those blocks are ignored. If the tab's guard is stale,
+it is dropped and the navigation re-issued unguarded.
 
 Rule rebuilds are **serialized** through a single promise chain (`rebuildRules`
 → `doRebuildRules`): the worker reacts to many independent events that each
@@ -219,6 +246,11 @@ validates everything and produces an installable bundle:
 ```sh
 ./scripts/build.sh
 ```
+
+or, equivalently, `make build`. A `Makefile` wraps the common commands:
+`make install` (npm install), `make test` (npm test), `make build`
+(scripts/build.sh), `make icons` (icons/make-icons.sh), `make clean`
+(remove `dist/`).
 
 Requirements: `zip` (required). `node` is **optional** — if present it
 syntax-checks the JS and reads the manifest version; if absent the build still
@@ -276,6 +308,12 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
    `urldefense.com`), then **paste a wrapped link to it in the address bar** and
    press Enter → the page loads but its onward redirect is gated with the
    confirmation page (it does **not** silently follow the redirect).
+10. Guard expiry: after step 8 lands, wait >10 s, then type an unrelated
+    `http://` URL in the same tab → it loads with **no** confirmation page.
+11. IP / local hosts: from a gated page, open a link to `http://127.0.0.1:<port>`
+    or a LAN IP → confirm page once; **Continue** loads it (no loop).
+    `chrome.declarativeNetRequest.getSessionRules(console.log)` shows an
+    `allow` rule with a `regexFilter` for it.
 
 ### Debugging
 
@@ -291,24 +329,22 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 - **Confirmation page:** it's a normal extension page — right-click → Inspect
   inside the guarded window when it's showing.
 
-- **DNR domain conditions never include IP literals.** `excludedRequestDomains`/
-  `initiatorDomains`/`requestDomains` only accept canonical domain names —
-  feeding them an IPv4/IPv6 literal (common for plain `http://` links to
-  routers, printers, or `localhost`-style hosts) makes
-  `updateSessionRules` reject the **entire** rule set, which used to leave a
-  stale/overly-broad block rule in place and show the confirm page in a loop
-  even for non-gated hosts. `lib/domain.js`'s `isDnrDomain()` filters such
-  hosts out of every `*Domains` array before it reaches DNR, and
-  `doRebuildRules()` omits `excludedRequestDomains` entirely when nothing is
-  left to exclude (DNR also rejects an empty array there). A host that can't
-  be expressed as a DNR exclusion but is already authorized (gated origin,
-  trusted, or "just once") is instead re-navigated once via `navRetry`
-  (`background.js`) rather than re-prompted.
-- **Non-DNR-expressible confirmations still complete.** Because those hosts
-  can't be excluded by a DNR rule, the confirm-page "continue" flow falls back
-  to a single automatic retry of the original navigation instead of relying on
-  the block rule to let it through; `navRetry` is per tab+host and resets on
-  the tab's next successful navigation.
+- **DNR domain conditions never include IP literals.** `lib/domain.js`'s
+  `isDnrDomain()` keeps IPv4/IPv6 literals and odd hosts out of every
+  `*Domains` array (one bad entry would make `updateSessionRules` reject the
+  whole rule set), and `doRebuildRules()` omits `excludedRequestDomains` when
+  nothing is left to exclude (DNR rejects an empty array). Such hosts are
+  allowed instead through the higher-priority **regex allow rules** (ids `4`
+  and `1500000000+n`, built by `hostsRegex()`), so **Continue** on
+  `http://192.168.1.1` or `http://127.0.0.1:8080` actually proceeds instead of
+  looping back to the confirm page. `localhost` is a valid DNR domain and uses
+  the normal exclusion.
+- **Spurious-block retry.** If an already-authorized host is still blocked (the
+  allow rule hadn't propagated yet), it is re-navigated once via `navRetry`
+  rather than re-prompted; the budget is per tab+host and resets on the tab's
+  next successful commit.
+- **Inspect guard state:** in the service-worker console,
+  `chrome.storage.session.get('gateState', console.log)`.
 
 ## Known limitations
 
@@ -320,16 +356,23 @@ The version is read from `manifest.json`. `dist/` is git-ignored.
 - **Per-hop gating covers `main_frame` requests.** The guarded window catches
   every main-frame request via `declarativeNetRequest` — the initial load, each
   HTTP 3xx hop, `<meta refresh>`, JS `location =`, and clicks to a new host —
-  and confirms each non-trusted host. The window stays guarded for its whole
-  lifetime, so it does not skip hops after an intermediate page loads. It cannot
+  and confirms each non-trusted host. The guard survives intermediate pages
+  for `GUARD_SETTLE_MS` (10 s) after each commit; a client-side redirect fired
+  later than that from a non-gated page is **not** gated, and a link clicked
+  within that window on the landing page **is** confirmed. It cannot
   see same-document changes (hash updates) or content swapped in via `fetch`/XHR
   without a new main-frame navigation.
 - **Guarding is per new window.** The flow opens the link in its own window and
   gates it until you close it. Links opened in the same tab are not gated (the
   extension targets new-window/new-tab opens, the common phishing vector).
-- **"Just once" allows last for the browser session.** Continuing past a host
-  without the "always trust" checkbox authorizes it for the rest of the session
-  (kept in worker memory); checking the box persists it to `trustedDomains`.
+- **"Just once" allows last until the tab's guard ends** (tab closed, guard
+  settles, or a new navigation from a gated page resets them). They are kept in
+  `chrome.storage.session`; checking "always trust" persists to
+  `trustedDomains`.
+- **Blocks by other extensions** are ignored in unguarded tabs. If another
+  extension blocks a navigation in a guarded tab, the extension can't tell it apart from its own
+  block and may show the confirm page; Continue then ends on the browser's
+  blocked page.
 - **New tabs/windows opened from a gated page are gated** — both anchor links
   (`target="_blank"`) and JavaScript `window.open(...)`. They surface as a
   `webNavigation` navigation target from the gated/guarded source tab, so the

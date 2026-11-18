@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 let mockTabUrls = {};
+let mockSessionData = {};
 
 // Mock the global chrome APIs
 const mockChrome = {
@@ -35,6 +36,10 @@ const mockChrome = {
         if (typeof cb === "function") return cb();
         return Promise.resolve();
       })
+    },
+    session: {
+      get: jest.fn((keys, cb) => cb(mockSessionData)),
+      set: jest.fn(() => Promise.resolve())
     },
     onChanged: { addListener: jest.fn() }
   },
@@ -93,6 +98,9 @@ describe("Background Service Worker Redirect Flow", () => {
     tabOriginHost = {};
     pendingGateNav = {};
     navRetry = {};
+    guardSettleAt = {};
+    guardedTabs = new Set();
+    gateSpawnedTabs = new Set();
 
     // Capture DNR rule updates to inspect what domains are excluded
     mockChrome.declarativeNetRequest.updateSessionRules.mockImplementation(rules => {
@@ -107,6 +115,7 @@ describe("Background Service Worker Redirect Flow", () => {
     // Each untrusted hop should trigger a block and redirect to confirm.html.
 
     const targetTabId = 42;
+    guardedTabs.add(targetTabId); // tab is in a guarded redirect chain
 
     // --- HOP 1: Navigation to redirect1.com ---
     // Simulate Chrome blocking navigation to redirect1.com due to DNR block rules
@@ -162,6 +171,7 @@ describe("Background Service Worker Redirect Flow", () => {
   });
 
   test("Untrust domain: removes domain from sessionAllowed when removed from trusted list", async () => {
+    guardedTabs.add(42);
     // Simulate user trusting a domain
     await allowDomain("trusted-domain.com", "https://trusted-domain.com", 42, true);
 
@@ -190,6 +200,7 @@ describe("Background Service Worker Redirect Flow", () => {
 
   test("HTTP Redirect scenario with Always Trust: next hops are still blocked", async () => {
     const targetTabId = 99;
+    guardedTabs.add(targetTabId);
 
     // Simulate Hop 1 blocked
     await onErrorOccurredCallback({
@@ -241,6 +252,7 @@ describe("Background Service Worker Redirect Flow", () => {
 
   test("Ezoic redirect scenario: only trusted domain is trusted, others show popup", async () => {
     const targetTabId = 100;
+    guardedTabs.add(targetTabId);
 
     // 1. Navigation to r.marketing.ezoic.com is blocked
     await onErrorOccurredCallback({
@@ -581,6 +593,120 @@ describe("Background Service Worker Redirect Flow", () => {
     lastRuleUpdate = ruleUpdates[ruleUpdates.length - 1];
     tab1Rule = lastRuleUpdate.addRules.find(r => r.id === 1000 + tab1);
     expect(tab1Rule.condition.excludedRequestDomains).not.toContain("domain1.com");
+  });
+
+  test("Foreign block (other extension) in an unguarded, non-gated tab is ignored", async () => {
+    gateList = ["bank.com"];
+    mockTabUrls[700] = "https://news.example/";
+    await onErrorOccurredCallback({
+      frameId: 0, tabId: 700, url: "http://ads.tracker.example/click",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+    expect(guardedTabs.has(700)).toBe(false);
+  });
+
+  test("Block in a tab opened from a gated page is handled (initiator rule)", async () => {
+    gateList = ["bank.com"];
+    tabOriginHost[710] = "bank.com";
+    mockChrome.tabs.get.mockImplementationOnce((id, cb) => cb({ id, url: "", openerTabId: 710 }));
+    await onErrorOccurredCallback({
+      frameId: 0, tabId: 711, url: "https://evil.example/",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(
+      711, expect.objectContaining({ url: expect.stringContaining("confirm/confirm.html") })
+    );
+  });
+
+  test("Guard settles: committing a non-gated page starts the settle window; gated page clears it", async () => {
+    gateList = ["bank.com"];
+    const tabId = 720;
+    onCommittedCallback({ frameId: 0, tabId, url: "https://bank.com/", transitionType: "typed", transitionQualifiers: [] });
+    expect(guardedTabs.has(tabId)).toBe(true);
+    expect(guardSettleAt[tabId]).toBeUndefined();
+
+    onCommittedCallback({ frameId: 0, tabId, url: "https://partner.com/", transitionType: "link", transitionQualifiers: [] });
+    expect(guardSettleAt[tabId]).toBeGreaterThan(Date.now());
+    expect(isGuardActive(tabId)).toBe(true);
+  });
+
+  test("Stale guard: a later navigation from a settled non-gated page is not captured", async () => {
+    gateList = ["bank.com"];
+    const tabId = 730;
+    guardedTabs.add(tabId);
+    guardSettleAt[tabId] = Date.now() - 1;
+    mockTabUrls[tabId] = "https://partner.com/";
+
+    await onErrorOccurredCallback({
+      frameId: 0, tabId, url: "http://other.example/page",
+      error: "net::ERR_BLOCKED_BY_CLIENT"
+    });
+    expect(guardedTabs.has(tabId)).toBe(false);
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(tabId, { url: "http://other.example/page" });
+    expect(mockChrome.tabs.update).not.toHaveBeenCalledWith(
+      tabId, expect.objectContaining({ url: expect.stringContaining("confirm/confirm.html") })
+    );
+  });
+
+  test("Stale guard is dropped on the next onBeforeNavigate and does not spread to new tabs", async () => {
+    gateList = ["bank.com"];
+    guardedTabs.add(740);
+    guardSettleAt[740] = Date.now() - 1;
+    onCreatedNavigationTargetCallback({ sourceTabId: 740, tabId: 741, url: "https://x.example/" });
+    expect(guardedTabs.has(741)).toBe(false);
+
+    onBeforeNavigateCallback({ frameId: 0, tabId: 740, url: "https://x.example/" });
+    expect(guardedTabs.has(740)).toBe(false);
+  });
+
+  test("IP / non-DNR host allowed just once gets a per-tab regex allow rule", async () => {
+    const tabId = 750;
+    guardedTabs.add(tabId);
+    await allowDomain("127.0.0.1", "http://127.0.0.1:8080/app", tabId);
+
+    const rules = ruleUpdates[ruleUpdates.length - 1].addRules;
+    const block = rules.find(r => r.id === 1000 + tabId);
+    expect(block.condition.excludedRequestDomains || []).not.toContain("127.0.0.1");
+    const allow = rules.find(r => r.action.type === "allow" && r.condition.tabIds && r.condition.tabIds[0] === tabId);
+    expect(allow).toBeDefined();
+    expect(allow.priority).toBeGreaterThan(block.priority);
+    const re = new RegExp(allow.condition.regexFilter, "i");
+    expect(re.test("http://127.0.0.1:8080/app")).toBe(true);
+    expect(re.test("http://127.0.0.1")).toBe(true);
+    expect(re.test("http://127.0.0.10/")).toBe(false);
+    expect(re.test("http://evil.com/?127.0.0.1")).toBe(false);
+  });
+
+  test("Trusted IPv6 / IP hosts get a global regex allow rule", async () => {
+    trustedList = ["192.168.1.1", "[::1]"];
+    await rebuildRules();
+    const rules = ruleUpdates[ruleUpdates.length - 1].addRules;
+    const allow = rules.find(r => r.id === ALLOW_TRUSTED_RULE_ID);
+    expect(allow).toBeDefined();
+    expect(allow.condition.tabIds).toBeUndefined();
+    const re = new RegExp(allow.condition.regexFilter, "i");
+    expect(re.test("http://192.168.1.1/admin")).toBe(true);
+    expect(re.test("http://[::1]:3000/")).toBe(true);
+  });
+
+  test("Guard state is persisted to and restored from storage.session", async () => {
+    guardedTabs.add(760);
+    sessionAllowed[760] = new Set(["a.com"]);
+    saveState();
+    await Promise.resolve();
+    await Promise.resolve();
+    const saved = mockChrome.storage.session.set.mock.calls.pop()[0][STATE_KEY];
+    expect(saved.guardedTabs).toContain(760);
+    expect(saved.sessionAllowed["760"]).toEqual(["a.com"]);
+
+    guardedTabs = new Set();
+    sessionAllowed = {};
+    mockSessionData = { [STATE_KEY]: saved };
+    await new Promise(resolve => loadState(resolve));
+    mockSessionData = {};
+    expect(guardedTabs.has(760)).toBe(true);
+    expect(sessionAllowed[760].has("a.com")).toBe(true);
   });
 });
 

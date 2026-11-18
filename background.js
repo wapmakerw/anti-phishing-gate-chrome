@@ -8,7 +8,8 @@
  *      redirect hop) is intercepted by a declarativeNetRequest rule and
  *      redirected to our in-extension confirmation page BEFORE it loads. The
  *      user authorizes each untrusted domain as the browser actually navigates;
- *      once it lands on an allowed HTML page, guarding stops.
+ *      once it has settled on a non-gated page for GUARD_SETTLE_MS, guarding
+ *      stops. Guard state is mirrored to chrome.storage.session.
  *
  * Why declarativeNetRequest: in MV3 a normal extension can't block webRequests
  * or read a redirect's Location header, and webNavigation doesn't fire per
@@ -25,6 +26,18 @@ var domainLib = self.GateDomain;
 // DNR session-rule ids
 var BLOCK_GUARDED_RULE_ID = 2;
 var BLOCK_GATE_RULE_ID = 3;
+var ALLOW_TRUSTED_RULE_ID = 4;          // regex allow for non-DNR trusted/gated hosts
+var ALLOW_TAB_RULE_BASE = 1500000000;   // + n: regex allow per guarded tab
+var ALLOW_PRIORITY = 20;                // beats the block rules (priority 10)
+
+// A guarded tab whose current page is NOT gated stops being guarded once it has
+// sat on that page this long without being bounced elsewhere. This window is
+// what still catches delayed client-side (JS / meta-refresh) redirect hops.
+var GUARD_SETTLE_MS = 10000;
+
+// chrome.storage.session key holding the in-memory guard state, so a service
+// worker restart (MV3 kills idle workers) doesn't forget it.
+var STATE_KEY = "gateState";
 
 var CONFIRM_URL = chrome.runtime.getURL("confirm/confirm.html");
 
@@ -39,8 +52,71 @@ var gateSpawnedTabs = new Set();  // new tabs opened from a gated/guarded page,
 var navRetry = {};                // tabId -> Set of authorized hosts we already
                                   // re-navigated once after a spurious block,
                                   // so a host DNR can't exclude can't loop
+var guardSettleAt = {};           // tabId -> time after which the guard is stale
+                                  // (set when a non-gated page commits)
 var gateList = [];             // cached copy of GATE_KEY
 var trustedList = [];             // cached copy of TRUSTED_KEY
+
+// ----------------------------------------------------------------------------
+// State persistence (chrome.storage.session) + readiness
+// ----------------------------------------------------------------------------
+
+function setToArr(s) { return s ? Array.from(s) : []; }
+function mapOfSets(obj, toSet) {
+  var out = {};
+  for (var k in obj) if (obj[k]) out[k] = toSet ? new Set(obj[k]) : Array.from(obj[k]);
+  return out;
+}
+
+var saveScheduled = false;
+// Debounced (one write per microtask burst) snapshot of the guard state.
+function saveState() {
+  if (saveScheduled || !chrome.storage.session) return;
+  saveScheduled = true;
+  Promise.resolve().then(function () {
+    saveScheduled = false;
+    var snapshot = {
+      guardedTabs: setToArr(guardedTabs),
+      gateSpawnedTabs: setToArr(gateSpawnedTabs),
+      sessionAllowed: mapOfSets(sessionAllowed, false),
+      navRetry: mapOfSets(navRetry, false),
+      tabOriginHost: tabOriginHost,
+      pendingGateNav: pendingGateNav,
+      guardSettleAt: guardSettleAt
+    };
+    return Promise.resolve(chrome.storage.session.set({ [STATE_KEY]: snapshot })).catch(function () {});
+  });
+}
+
+function loadState(cb) {
+  if (!chrome.storage.session) return cb();
+  chrome.storage.session.get(STATE_KEY, function (data) {
+    var s = data && data[STATE_KEY];
+    if (s) {
+      guardedTabs = new Set((s.guardedTabs || []).map(Number));
+      gateSpawnedTabs = new Set((s.gateSpawnedTabs || []).map(Number));
+      sessionAllowed = mapOfSets(s.sessionAllowed || {}, true);
+      navRetry = mapOfSets(s.navRetry || {}, true);
+      tabOriginHost = s.tabOriginHost || {};
+      pendingGateNav = s.pendingGateNav || {};
+      guardSettleAt = s.guardSettleAt || {};
+    }
+    cb();
+  });
+}
+
+// Event handlers must not run against empty caches right after a worker
+// restart, or they'd treat already-authorized hosts as unknown and re-prompt.
+// (`ready` itself is created in the Init section at the bottom.)
+var stateLoaded = false;
+var ready;
+function whenReady(fn) {
+  return function () {
+    var args = arguments;
+    if (stateLoaded) return fn.apply(this, args);
+    return ready.then(function () { return fn.apply(null, args); });
+  };
+}
 
 function hostOf(url) {
   return domainLib.hostOf(url);
@@ -86,6 +162,33 @@ function isAllowedDestination(host, tabId) {
   if (hostMatches(host, gateList) || hostMatches(host, trustedList)) return true;
   var allowed = sessionAllowed[tabId];
   return Boolean(allowed && allowed.has(host));
+}
+
+// The tab is guarded but has settled on a non-gated page for GUARD_SETTLE_MS:
+// any navigation from here on is a fresh one by the user, not a redirect hop.
+function isGuardStale(tabId) {
+  var t = guardSettleAt[tabId];
+  return guardedTabs.has(tabId) && t != null && Date.now() >= t;
+}
+
+function isGuardActive(tabId) {
+  return guardedTabs.has(tabId) && !isGuardStale(tabId);
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// regexFilter matching main-frame URLs on exactly these hosts (any port).
+// Used for hosts DNR can't take as a domain condition (IP literals, IPv6, odd
+// characters), so they can still be allowed — otherwise "Continue" on them can
+// never succeed and the user is re-prompted forever.
+function hostsRegex(hosts) {
+  return "^https?://([^/?#@]*@)?(" + hosts.map(escapeRegex).join("|") + ")(:[0-9]+)?([/?#]|$)";
+}
+
+function nonDnrHosts(list) {
+  return list.filter(function (h) { return h && !domainLib.isDnrDomain(h); });
 }
 
 // ----------------------------------------------------------------------------
@@ -181,6 +284,7 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 // ID". Chaining every rebuild guarantees one runs at a time.
 var rebuildQueue = Promise.resolve();
 function rebuildRules() {
+  saveState(); // every rebuild follows a guard-state change
   var run = rebuildQueue.then(doRebuildRules, doRebuildRules);
   // Keep the queue alive even if this run rejects, so later rebuilds still fire.
   rebuildQueue = run.catch(function () {});
@@ -213,6 +317,36 @@ async function doRebuildRules() {
       priority: 10,
       action: { type: "block" },
       condition: tabCondition
+    });
+
+    // Hosts allowed "just once" in this tab that can't be DNR-excluded.
+    var tabRegexHosts = nonDnrHosts(allowed);
+    if (tabRegexHosts.length) {
+      addRules.push({
+        id: ALLOW_TAB_RULE_BASE + i,
+        priority: ALLOW_PRIORITY,
+        action: { type: "allow" },
+        condition: {
+          resourceTypes: ["main_frame"],
+          tabIds: [tabId],
+          regexFilter: hostsRegex(tabRegexHosts)
+        }
+      });
+    }
+  }
+
+  // Trusted / gated hosts that can't be DNR-excluded: allow them everywhere,
+  // overriding both the per-tab and the initiator block rules.
+  var globalRegexHosts = nonDnrHosts(uniq(trustedList.concat(gateList)));
+  if (globalRegexHosts.length) {
+    addRules.push({
+      id: ALLOW_TRUSTED_RULE_ID,
+      priority: ALLOW_PRIORITY,
+      action: { type: "allow" },
+      condition: {
+        resourceTypes: ["main_frame"],
+        regexFilter: hostsRegex(globalRegexHosts)
+      }
     });
   }
 
@@ -250,22 +384,25 @@ async function doRebuildRules() {
 
 function unguard(tabId) {
   delete sessionAllowed[tabId];
-  if (guardedTabs.delete(tabId)) rebuildRules();
+  delete guardSettleAt[tabId];
+  if (guardedTabs.delete(tabId)) return rebuildRules();
+  saveState();
+  return Promise.resolve();
 }
 
-chrome.tabs.onRemoved.addListener(function (tabId) {
+chrome.tabs.onRemoved.addListener(whenReady(function (tabId) {
   delete tabOriginHost[tabId];
   delete pendingGateNav[tabId];
   delete navRetry[tabId];
   gateSpawnedTabs.delete(tabId);
   unguard(tabId);
-});
+}));
 
 // ----------------------------------------------------------------------------
 // Blocked Navigation Interception
 // ----------------------------------------------------------------------------
 
-chrome.webNavigation.onErrorOccurred.addListener(function (details) {
+chrome.webNavigation.onErrorOccurred.addListener(whenReady(function (details) {
   if (details.frameId !== 0) return;
   if (details.error === "net::ERR_BLOCKED_BY_CLIENT") {
     var blockedUrl = details.url;
@@ -278,13 +415,37 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
 
     return new Promise(function (resolve) {
       chrome.tabs.get(tabId, function (tab) {
-        if (!chrome.runtime.lastError && tab && tab.url) {
-          var currentHost = hostOf(tab.url);
-          if (currentHost && gateList.indexOf(currentHost) !== -1) {
-            // Fresh navigation FROM a gated origin: drop the "just once" allows
-            // so each new outbound navigation is confirmed again.
-            sessionAllowed[tabId] = new Set();
-          }
+        var tabOk = !chrome.runtime.lastError && tab;
+        var currentHost = tabOk && tab.url ? hostOf(tab.url) : "";
+        var onGate = Boolean(currentHost && gateList.indexOf(currentHost) !== -1);
+        var opener = tabOk ? tab.openerTabId : null;
+        var openedFromGate = opener != null && (
+          isGuardActive(opener) || gateList.indexOf(tabOriginHost[opener]) !== -1
+        );
+
+        // Only OUR rules may lead to the confirm page: the per-tab rule (tab is
+        // guarded) or the initiator rule (tab is on / was opened from a gated
+        // page). ERR_BLOCKED_BY_CLIENT is also what ad/tracker blockers and
+        // other extensions produce — those blocks are none of our business.
+        if (!guardedTabs.has(tabId) && !onGate && !openedFromGate) {
+          resolve();
+          return;
+        }
+
+        // The guard outlived its redirect chain (tab settled on a non-gated
+        // page): this is a fresh navigation by the user. Drop the guard and
+        // re-issue it unguarded.
+        if (isGuardStale(tabId) && !onGate) {
+          resolve(unguard(tabId).then(function () {
+            return safeTabUpdate(tabId, { url: blockedUrl });
+          }));
+          return;
+        }
+
+        if (onGate) {
+          // Fresh navigation FROM a gated origin: drop the "just once" allows
+          // so each new outbound navigation is confirmed again.
+          sessionAllowed[tabId] = new Set();
         }
 
         // After any reset above, is the blocked host STILL authorized for this
@@ -306,22 +467,24 @@ chrome.webNavigation.onErrorOccurred.addListener(function (details) {
         }
 
         guardedTabs.add(tabId);
+        delete guardSettleAt[tabId]; // waiting on the user, not settled
         resolve(rebuildRules().then(function () {
           return safeTabUpdate(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(blockedUrl) });
         }));
       });
     });
   }
-});
+}));
 
 // A link/script in a gated (or already-guarded) tab opened a NEW tab/window.
 // We guard the new tab, but installing its per-tab DNR rule is async and can
 // lose the race against the new tab's very first request — so the rule may not
 // be in place in time to block it. Tagging the tab in gateSpawnedTabs lets the
 // onCommitted fallback gate that first landing if the rule was too slow.
-chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
+chrome.webNavigation.onCreatedNavigationTarget.addListener(whenReady(function (details) {
   if (details.sourceTabId == null || details.sourceTabId === -1) return;
-  var isSourceGuarded = guardedTabs.has(details.sourceTabId);
+  // A stale guard (source settled on a non-gated page) doesn't propagate.
+  var isSourceGuarded = isGuardActive(details.sourceTabId);
   if (isSourceGuarded) {
     gateSpawnedTabs.add(details.tabId);
     guardedTabs.add(details.tabId);
@@ -337,7 +500,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(function (details) {
       rebuildRules();
     }
   });
-});
+}));
 
 // A transition that represents the user (or the page) following a link in the
 // same tab, rather than typing/bookmarking a fresh address.
@@ -362,8 +525,12 @@ function guardTab(tabId) {
 // address bar: its onward 3xx/JS redirect is initiated with no gate referrer,
 // so the initiator rule can't see it, but the per-tab rule (installed here,
 // before the page loads) gates every hop that leaves the gated host.
-chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
+chrome.webNavigation.onBeforeNavigate.addListener(whenReady(function (details) {
   if (details.frameId !== 0) return;
+  // The tab settled on a non-gated page long ago: this is a fresh navigation,
+  // not a redirect hop, so stop guarding before its request goes out. (If the
+  // rule removal loses the race, onErrorOccurred re-issues it unguarded.)
+  if (isGuardStale(details.tabId)) unguard(details.tabId);
   var targetHost = hostOf(details.url);
   if (targetHost && gateList.indexOf(targetHost) !== -1) {
     // Fast path: install the per-tab gate before the page loads. This wins the
@@ -377,7 +544,8 @@ chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
     // intent so the redirect fallback can't mis-fire on the next commit.
     delete pendingGateNav[details.tabId];
   }
-});
+  saveState();
+}));
 
 // Same-tab direct-link gating: when a direct link/redirect LEAVES a gated
 // domain in the same tab, guard the tab so every redirect hop that follows is
@@ -385,7 +553,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
 // DNR rule already gates hops while the initiator is the gate page; this
 // covers client-side redirects fired after the link's destination has loaded,
 // whose initiator is no longer the gate domain.)
-chrome.webNavigation.onCommitted.addListener(function (details) {
+chrome.webNavigation.onCommitted.addListener(whenReady(function (details) {
   if (details.frameId !== 0) return;
   var tabId = details.tabId;
   var prevHost = tabOriginHost[tabId];
@@ -410,7 +578,9 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
     ((pendingGate && newHost !== pendingGate) || spawnedFromGate)
   ) {
     guardTab(tabId);
+    delete guardSettleAt[tabId];
     tabOriginHost[tabId] = newHost;
+    saveState();
     safeTabUpdate(tabId, { url: CONFIRM_URL + "?d=" + encodeURIComponent(details.url) });
     return;
   }
@@ -436,9 +606,19 @@ chrome.webNavigation.onCommitted.addListener(function (details) {
   // should be free to prompt again.
   if (newHost && navRetry[tabId]) delete navRetry[tabId];
 
+  // Guard lifetime: while the tab sits on a gated page (or our confirm page,
+  // newHost "") the guard holds indefinitely. Once a non-gated page commits,
+  // start the settle window; if nothing redirects it onward within
+  // GUARD_SETTLE_MS, the guard goes stale and the next navigation is free.
+  if (guardedTabs.has(tabId)) {
+    if (newHost && !landedOnGate) guardSettleAt[tabId] = Date.now() + GUARD_SETTLE_MS;
+    else delete guardSettleAt[tabId];
+  }
+
   // Remember the committed host so the next navigation knows where it came from.
   tabOriginHost[tabId] = newHost || prevHost;
-});
+  saveState();
+}));
 
 // ----------------------------------------------------------------------------
 // Messages from the confirmation page (allow/cancel)
@@ -468,6 +648,7 @@ function cancelGuard(tabId) {
   if (tabId == null) return;
   guardedTabs.delete(tabId);
   delete sessionAllowed[tabId];
+  delete guardSettleAt[tabId];
   rebuildRules();
   chrome.tabs.goBack(tabId, function () {
     if (chrome.runtime.lastError) {
@@ -480,15 +661,19 @@ function cancelGuard(tabId) {
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || !msg.type) return;
+  // Wait for restored state: the confirm page may wake a stopped worker.
   if (msg.type === "allowDomain") {
-    allowDomain(msg.domain, msg.target, msg.tabId, !!msg.always)
-      .then(function () { sendResponse({ ok: true }); },
-        function (e) { sendResponse({ ok: false, error: String(e) }); });
+    ready.then(function () {
+      return allowDomain(msg.domain, msg.target, msg.tabId, !!msg.always);
+    }).then(function () { sendResponse({ ok: true }); },
+      function (e) { sendResponse({ ok: false, error: String(e) }); });
     return true;
   }
   if (msg.type === "cancelGuard") {
-    cancelGuard(msg.tabId);
-    sendResponse({ ok: true });
+    ready.then(function () {
+      cancelGuard(msg.tabId);
+      sendResponse({ ok: true });
+    });
     return true;
   }
 });
@@ -497,11 +682,22 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // Init
 // ----------------------------------------------------------------------------
 
+// Worker (re)start: restore lists + guard state, then rebuild rules from it.
+ready = new Promise(function (resolve) {
+  loadGateAndTrusted(function () {
+    loadState(function () {
+      stateLoaded = true;
+      resolve();
+      rebuildRules();
+    });
+  });
+});
+
 function init() {
-  loadGateAndTrusted(rebuildRules);
+  ready.then(function () { loadGateAndTrusted(rebuildRules); });
   refreshActiveTab();
 }
 
 chrome.runtime.onInstalled.addListener(init);
 chrome.runtime.onStartup.addListener(init);
-init();
+refreshActiveTab();
